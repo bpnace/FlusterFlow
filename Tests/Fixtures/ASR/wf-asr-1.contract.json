@@ -1,0 +1,55 @@
+{
+  "allowedSourceKinds": [
+    "synthetic",
+    "publicLicensed",
+    "consented"
+  ],
+  "corpusID": "WF-ASR-1",
+  "corpusVersion": "1",
+  "maximumSpeechDurationSeconds": 30,
+  "minimumSpeechDurationSeconds": 2,
+  "performanceSample": {
+    "coldStartsPerCandidate": 10,
+    "countByLanguage": {
+      "de": 30,
+      "en": 30
+    },
+    "maximumDurationSeconds": 8,
+    "minimumDurationSeconds": 5,
+    "warmupRunsPerCandidate": 5
+  },
+  "profile": "release",
+  "schemaVersion": 1,
+  "silenceClipCount": 20,
+  "speechClipCount": 120,
+  "speechCountByLanguage": {
+    "de": 60,
+    "en": 60
+  },
+  "stratumRequirements": [
+    {
+      "perLanguage": 10,
+      "stratum": "cleanStandard"
+    },
+    {
+      "perLanguage": 10,
+      "stratum": "roomNoise"
+    },
+    {
+      "perLanguage": 10,
+      "stratum": "accents"
+    },
+    {
+      "perLanguage": 10,
+      "stratum": "namedTerms"
+    },
+    {
+      "perLanguage": 10,
+      "stratum": "spokenLists"
+    },
+    {
+      "perLanguage": 10,
+      "stratum": "selfCorrection"
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "corpusID" : "WF-PERSONAL-DE-1",
+  "corpusVersion" : "1",
+  "observations" : [
+    {
+      "asrLatencyMilliseconds" : 900,
+      "backendID" : "adaptive",
+      "clipID" : "wf-personal-de-1-001",
+      "confidenceClass" : "high",
+      "durationClass" : "medium",
+      "peakRSSBytes" : 700000000,
+      "phase" : "measured",
+      "prewarmSucceeded" : null,
+      "quality" : {
+        "contextTermCorrectCount" : 18,
+        "contextTermExpectedCount" : 20,
+        "fillerFalseNegativeCount" : 1,
+        "fillerFalsePositiveCount" : 0,
+        "fillerTruePositiveCount" : 9,
+        "protectedAnchorExpectedCount" : 5,
+        "protectedAnchorPreservedCount" : 5,
+        "referenceWordCount" : 100,
+        "selfCorrectionExpectedCount" : 10,
+        "selfCorrectionPassedCount" : 10,
+        "werDeletionCount" : 1,
+        "werInsertionCount" : 1,
+        "werSubstitutionCount" : 3
+      },
+      "scheduleOrdinal" : 0,
+      "temperatureClass" : "warm",
+      "usedAdaptiveFallback" : true,
+      "vadSpeechDetected" : true
+    },
+    {
+      "asrLatencyMilliseconds" : 1000,
+      "backendID" : "large-v3",
+      "clipID" : "wf-personal-de-1-001",
+      "confidenceClass" : "high",
+      "durationClass" : "medium",
+      "peakRSSBytes" : 900000000,
+      "phase" : "measured",
+      "prewarmSucceeded" : null,
+      "quality" : {
+        "contextTermCorrectCount" : 19,
+        "contextTermExpectedCount" : 20,
+        "fillerFalseNegativeCount" : 1,
+        "fillerFalsePositiveCount" : 0,
+        "fillerTruePositiveCount" : 9,
+        "protectedAnchorExpectedCount" : 5,
+        "protectedAnchorPreservedCount" : 5,
+        "referenceWordCount" : 100,
+        "selfCorrectionExpectedCount" : 10,
+        "selfCorrectionPassedCount" : 10,
+        "werDeletionCount" : 1,
+        "werInsertionCount" : 0,
+        "werSubstitutionCount" : 4
+      },
+      "scheduleOrdinal" : 1,
+      "temperatureClass" : "warm",
+      "usedAdaptiveFallback" : false,
+      "vadSpeechDetected" : true
+    }
+  ],
+  "schedule" : {
+    "algorithm" : "splitmix64-fisher-yates-v1",
+    "seed" : 1,
+    "trials" : [
+
+    ],
+    "warmupRunsPerCandidate" : 0
+  },
+  "schemaVersion" : 2
+}

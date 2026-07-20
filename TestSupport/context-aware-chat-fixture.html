@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <title>ChatGPT Context Fixture</title>
+  <style>
+    body {
+      font: 18px -apple-system, BlinkMacSystemFont, sans-serif;
+      margin: 48px auto;
+      max-width: 760px;
+      color: #17202a;
+      background: #f7f8fa;
+    }
+    main {
+      background: white;
+      border: 1px solid #d8dde5;
+      border-radius: 18px;
+      padding: 28px;
+    }
+    .message {
+      margin: 0 0 18px;
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: #eef2f7;
+    }
+    textarea {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 120px;
+      padding: 14px;
+      font: inherit;
+    }
+  </style>
+</head>
+<body>
+  <main aria-label="Lokaler Chat-Kontexttest">
+    <h1>Lokaler Chat</h1>
+    <p class="message">Nutzer: Das Projekt heißt Nebelstern und bleibt vollständig lokal.</p>
+    <p class="message">Assistent: Als nächstes soll die Kontextprüfung im Browser getestet werden.</p>
+    <label for="composer">Nachricht</label>
+    <textarea id="composer" autofocus aria-label="Nachricht eingeben"></textarea>
+  </main>
+</body>
+</html>

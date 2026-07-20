@@ -1,0 +1,131 @@
+{
+  "clips": [
+    {
+      "assetPath": "external/de-clean-001.wav",
+      "assetSHA256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "assetState": "unprovisioned",
+      "durationSeconds": 6,
+      "goldTranscript": "FlusterFlow arbeitet vollständig lokal",
+      "id": "de-clean-001",
+      "isPerformanceSample": true,
+      "kind": "speech",
+      "language": "de",
+      "provenance": {
+        "generator": "fixture-contract-only",
+        "generatorVersion": "1",
+        "sourceKind": "synthetic",
+        "sourceReference": "no-audio-repository-placeholder"
+      },
+      "qualityBand": "clean",
+      "stratum": "cleanStandard",
+      "substantialSpans": [
+        {
+          "id": "de-clean-001-s1",
+          "text": "vollständig lokal"
+        }
+      ]
+    },
+    {
+      "assetPath": "external/de-noisy-001.wav",
+      "assetSHA256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "assetState": "unprovisioned",
+      "durationSeconds": 3,
+      "goldTranscript": "Der Termin beginnt um neun Uhr",
+      "id": "de-noisy-001",
+      "isPerformanceSample": false,
+      "kind": "speech",
+      "language": "de",
+      "provenance": {
+        "generator": "fixture-contract-only",
+        "generatorVersion": "1",
+        "sourceKind": "synthetic",
+        "sourceReference": "no-audio-repository-placeholder"
+      },
+      "qualityBand": "noisyMixed",
+      "stratum": "roomNoise",
+      "substantialSpans": [
+        {
+          "id": "de-noisy-001-s1",
+          "text": "neun Uhr"
+        }
+      ]
+    },
+    {
+      "assetPath": "external/en-clean-001.wav",
+      "assetSHA256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "assetState": "unprovisioned",
+      "durationSeconds": 7,
+      "goldTranscript": "The private model stays offline",
+      "id": "en-clean-001",
+      "isPerformanceSample": true,
+      "kind": "speech",
+      "language": "en",
+      "provenance": {
+        "generator": "fixture-contract-only",
+        "generatorVersion": "1",
+        "sourceKind": "synthetic",
+        "sourceReference": "no-audio-repository-placeholder"
+      },
+      "qualityBand": "clean",
+      "stratum": "cleanStandard",
+      "substantialSpans": [
+        {
+          "id": "en-clean-001-s1",
+          "text": "stays offline"
+        }
+      ]
+    },
+    {
+      "assetPath": "external/en-noisy-001.wav",
+      "assetSHA256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "assetState": "unprovisioned",
+      "durationSeconds": 4,
+      "goldTranscript": "Send the draft before Friday",
+      "id": "en-noisy-001",
+      "isPerformanceSample": false,
+      "kind": "speech",
+      "language": "en",
+      "provenance": {
+        "generator": "fixture-contract-only",
+        "generatorVersion": "1",
+        "sourceKind": "synthetic",
+        "sourceReference": "no-audio-repository-placeholder"
+      },
+      "qualityBand": "noisyMixed",
+      "stratum": "roomNoise",
+      "substantialSpans": [
+        {
+          "id": "en-noisy-001-s1",
+          "text": "before Friday"
+        }
+      ]
+    },
+    {
+      "assetPath": "external/silence-001.wav",
+      "assetSHA256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "assetState": "unprovisioned",
+      "durationSeconds": 2,
+      "goldTranscript": "",
+      "id": "silence-001",
+      "isPerformanceSample": false,
+      "kind": "silence",
+      "provenance": {
+        "generator": "fixture-contract-only",
+        "generatorVersion": "1",
+        "sourceKind": "synthetic",
+        "sourceReference": "no-audio-repository-placeholder"
+      },
+      "substantialSpans": []
+    }
+  ],
+  "corpusID": "WF-ASR-SMOKE-1",
+  "corpusVersion": "1",
+  "profile": "syntheticSmoke",
+  "provenance": {
+    "declaration": "Synthetic text-only smoke fixture; no audio or private data is stored.",
+    "description": "Exercises schemas, metrics, scheduling, reporting, and fail-closed gates.",
+    "producer": "WhisperFlow benchmark harness",
+    "repositoryRevision": "uncommitted-smoke-fixture-v1"
+  },
+  "schemaVersion": 1
+}

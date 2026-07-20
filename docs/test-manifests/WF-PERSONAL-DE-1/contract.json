@@ -1,0 +1,33 @@
+{
+  "assetPolicy" : "local-gitignored-audio-and-transcripts",
+  "categories" : [
+    {
+      "category" : "standard",
+      "count" : 10
+    },
+    {
+      "category" : "domainTerms",
+      "count" : 10
+    },
+    {
+      "category" : "fillerCorrection",
+      "count" : 10
+    },
+    {
+      "category" : "noise",
+      "count" : 5
+    },
+    {
+      "category" : "whisper",
+      "count" : 5
+    }
+  ],
+  "clipCount" : 40,
+  "corpusID" : "WF-PERSONAL-DE-1",
+  "corpusVersion" : "1",
+  "deletionPolicy" : "remove docs/test-manifests/WF-PERSONAL-DE-1/private",
+  "language" : "de",
+  "maximumDurationSeconds" : 30,
+  "minimumDurationSeconds" : 2,
+  "schemaVersion" : 1
+}

@@ -1,0 +1,37 @@
+{
+  "allowedSourceKinds": [
+    "synthetic"
+  ],
+  "corpusID": "WF-ASR-SMOKE-1",
+  "corpusVersion": "1",
+  "maximumSpeechDurationSeconds": 30,
+  "minimumSpeechDurationSeconds": 2,
+  "performanceSample": {
+    "coldStartsPerCandidate": 1,
+    "countByLanguage": {
+      "de": 1,
+      "en": 1
+    },
+    "maximumDurationSeconds": 8,
+    "minimumDurationSeconds": 5,
+    "warmupRunsPerCandidate": 1
+  },
+  "profile": "syntheticSmoke",
+  "schemaVersion": 1,
+  "silenceClipCount": 1,
+  "speechClipCount": 4,
+  "speechCountByLanguage": {
+    "de": 2,
+    "en": 2
+  },
+  "stratumRequirements": [
+    {
+      "perLanguage": 1,
+      "stratum": "cleanStandard"
+    },
+    {
+      "perLanguage": 1,
+      "stratum": "roomNoise"
+    }
+  ]
+}

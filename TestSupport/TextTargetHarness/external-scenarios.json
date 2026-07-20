@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "harnessId": "E-TARGET-EXTERNAL-MANUAL",
+  "resultSchema": "result.schema.json",
+  "scenarios": [
+    {
+      "id": "external-safari-textarea",
+      "surface": "Safari.textarea",
+      "execution": "manual",
+      "initialText": "Alpha Gamma",
+      "selection": { "location": 6, "length": 0 },
+      "insertText": "Beta ",
+      "expectedText": "Alpha Beta Gamma",
+      "expectedOutcome": "directAX",
+      "pasteboardMustRemainUnchanged": true
+    },
+    {
+      "id": "external-chromium-contenteditable",
+      "surface": "Chromium.contenteditable",
+      "execution": "manual",
+      "initialText": "Draft text",
+      "selection": { "location": 10, "length": 0 },
+      "insertText": " added",
+      "allowedOutcomes": ["directAX", "guardedCGEvent", "safeFallback"],
+      "requiresConfirmedMutationForSuccess": true,
+      "pasteboardMustRemainUnchanged": true
+    },
+    {
+      "id": "external-electron-editor",
+      "surface": "Electron.contenteditable",
+      "execution": "manual",
+      "initialText": "Message",
+      "selection": { "location": 7, "length": 0 },
+      "insertText": " local",
+      "allowedOutcomes": ["directAX", "guardedCGEvent", "safeFallback"],
+      "requiresConfirmedMutationForSuccess": true,
+      "pasteboardMustRemainUnchanged": true
+    },
+    {
+      "id": "external-browser-password-denied",
+      "surface": "Browser.input[type=password]",
+      "execution": "manual",
+      "initialText": "synthetic-password",
+      "insertText": "blocked",
+      "expectedOutcome": "insertionDenied",
+      "confirmedMutation": false,
+      "pasteboardMustRemainUnchanged": true
+    }
+  ]
+}

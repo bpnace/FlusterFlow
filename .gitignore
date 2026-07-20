@@ -1,0 +1,29 @@
+# Xcode
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.xcscmblueprint
+
+# SwiftPM
+.build/
+.swiftpm/
+
+# macOS
+.DS_Store
+
+# Local signing and secrets
+*.p12
+*.cer
+*.mobileprovision
+*.env
+.env.*
+
+# Local model artifacts
+Models/
+*.mlmodelc/
+
+# Local OMX runtime state
+.omx/state/
+.omx/tmux-hook.json

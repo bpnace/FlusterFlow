@@ -1,0 +1,476 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		100000000000000000000101 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000911 /* FluidAudio */; };
+		100000000000000000000102 /* WhisperFlow Source Resources in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000201 /* WhisperFlow Source Resources */; };
+		100000000000000000000103 /* Test Fixtures in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000202 /* Test Fixtures */; };
+		100000000000000000000104 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000203 /* Assets.xcassets */; };
+		100000000000000000000105 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000913 /* WhisperKit */; };
+		100000000000000000000106 /* MLXAudioSTT in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000915 /* MLXAudioSTT */; };
+		100000000000000000000107 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000917 /* MLX */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		100000000000000000000501 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 100000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 100000000000000000000401;
+			remoteInfo = WhisperFlow;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		100000000000000000000201 /* WhisperFlow Source Resources */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "WhisperFlow Source Resources"; path = WhisperFlow; sourceTree = "<group>"; };
+		100000000000000000000202 /* Test Fixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "Test Fixtures"; path = Tests/Fixtures; sourceTree = "<group>"; };
+		100000000000000000000203 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets/Assets.xcassets; sourceTree = "<group>"; };
+		100000000000000000000301 /* FlusterFlow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FlusterFlow.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		100000000000000000000302 /* WhisperFlowTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WhisperFlowTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		100000000000000000000010 /* WhisperFlow */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WhisperFlow;
+			sourceTree = "<group>";
+		};
+		100000000000000000000020 /* WhisperFlowTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WhisperFlowTests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		100000000000000000000601 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000101 /* FluidAudio in Frameworks */,
+				100000000000000000000105 /* WhisperKit in Frameworks */,
+				100000000000000000000106 /* MLXAudioSTT in Frameworks */,
+				100000000000000000000107 /* MLX in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000602 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		100000000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				100000000000000000000010 /* WhisperFlow */,
+				100000000000000000000020 /* WhisperFlowTests */,
+				100000000000000000000201 /* WhisperFlow Source Resources */,
+				100000000000000000000202 /* Test Fixtures */,
+				100000000000000000000203 /* Assets.xcassets */,
+				100000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		100000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				100000000000000000000301 /* FlusterFlow.app */,
+				100000000000000000000302 /* WhisperFlowTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		100000000000000000000401 /* WhisperFlow */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000801 /* Build configuration list for PBXNativeTarget "WhisperFlow" */;
+			buildPhases = (
+				100000000000000000000701 /* Sources */,
+				100000000000000000000601 /* Frameworks */,
+				100000000000000000000703 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				100000000000000000000010 /* WhisperFlow */,
+			);
+			name = WhisperFlow;
+			packageProductDependencies = (
+				100000000000000000000911 /* FluidAudio */,
+				100000000000000000000913 /* WhisperKit */,
+				100000000000000000000915 /* MLXAudioSTT */,
+				100000000000000000000917 /* MLX */,
+			);
+			productName = WhisperFlow;
+			productReference = 100000000000000000000301 /* FlusterFlow.app */;
+			productType = "com.apple.product-type.application";
+		};
+		100000000000000000000402 /* WhisperFlowTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000802 /* Build configuration list for PBXNativeTarget "WhisperFlowTests" */;
+			buildPhases = (
+				100000000000000000000702 /* Sources */,
+				100000000000000000000602 /* Frameworks */,
+				100000000000000000000704 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				100000000000000000000502 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				100000000000000000000020 /* WhisperFlowTests */,
+			);
+			name = WhisperFlowTests;
+			packageProductDependencies = (
+			);
+			productName = WhisperFlowTests;
+			productReference = 100000000000000000000302 /* WhisperFlowTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		100000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					100000000000000000000401 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					100000000000000000000402 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 100000000000000000000401;
+					};
+				};
+			};
+			buildConfigurationList = 100000000000000000000800 /* Build configuration list for PBXProject "WhisperFlow" */;
+			developmentRegion = de;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				de,
+				en,
+				Base,
+			);
+			mainGroup = 100000000000000000000002;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				100000000000000000000910 /* XCRemoteSwiftPackageReference "FluidAudio" */,
+				100000000000000000000912 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */,
+				100000000000000000000914 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */,
+				100000000000000000000916 /* XCRemoteSwiftPackageReference "mlx-swift" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 100000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				100000000000000000000401 /* WhisperFlow */,
+				100000000000000000000402 /* WhisperFlowTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		100000000000000000000703 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000104 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000704 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000102 /* WhisperFlow Source Resources in Resources */,
+				100000000000000000000103 /* Test Fixtures in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		100000000000000000000701 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000702 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		100000000000000000000502 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 100000000000000000000401 /* WhisperFlow */;
+			targetProxy = 100000000000000000000501 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		100000000000000000000901 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		100000000000000000000902 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		100000000000000000000903 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = WhisperFlow/WhisperFlow.entitlements;
+				CODE_SIGN_IDENTITY = "FlusterFlow Private Signing";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 9;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_DEBUG_DYLIB = NO;
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "FlusterFlow Debug";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "FlusterFlow verwendet das Mikrofon ausschließlich für lokal gestartete Diktate.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.2.7;
+				PRODUCT_BUNDLE_IDENTIFIER = com.flusterflow.private.debug;
+				PRODUCT_MODULE_NAME = WhisperFlow;
+				PRODUCT_NAME = "FlusterFlow Debug";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		100000000000000000000904 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = WhisperFlow/WhisperFlow.entitlements;
+				CODE_SIGN_IDENTITY = "FlusterFlow Private Signing";
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 9;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = FlusterFlow;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "FlusterFlow verwendet das Mikrofon ausschließlich für lokal gestartete Diktate.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.2.7;
+				PRODUCT_BUNDLE_IDENTIFIER = com.flusterflow.private;
+				PRODUCT_MODULE_NAME = WhisperFlow;
+				PRODUCT_NAME = FlusterFlow;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		100000000000000000000905 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "FlusterFlow Private Signing";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 9;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.2.7;
+				PRODUCT_BUNDLE_IDENTIFIER = com.flusterflow.private.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FlusterFlow Debug.app/Contents/MacOS/FlusterFlow Debug";
+			};
+			name = Debug;
+		};
+		100000000000000000000906 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "FlusterFlow Private Signing";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 9;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.2.7;
+				PRODUCT_BUNDLE_IDENTIFIER = com.flusterflow.private.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FlusterFlow.app/Contents/MacOS/FlusterFlow";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		100000000000000000000800 /* Build configuration list for PBXProject "WhisperFlow" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000901 /* Debug */,
+				100000000000000000000902 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		100000000000000000000801 /* Build configuration list for PBXNativeTarget "WhisperFlow" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000903 /* Debug */,
+				100000000000000000000904 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		100000000000000000000802 /* Build configuration list for PBXNativeTarget "WhisperFlowTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000905 /* Debug */,
+				100000000000000000000906 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		100000000000000000000910 /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.15.5;
+			};
+		};
+		100000000000000000000912 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/argmax-oss-swift.git";
+			requirement = {
+				kind = exactVersion;
+				version = 1.0.0;
+			};
+		};
+		100000000000000000000914 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Blaizzy/mlx-audio-swift.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.1.3;
+			};
+		};
+		100000000000000000000916 /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.31.4;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		100000000000000000000911 /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 100000000000000000000910 /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
+		};
+		100000000000000000000913 /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 100000000000000000000912 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */;
+			productName = WhisperKit;
+		};
+		100000000000000000000915 /* MLXAudioSTT */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 100000000000000000000914 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */;
+			productName = MLXAudioSTT;
+		};
+		100000000000000000000917 /* MLX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 100000000000000000000916 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLX;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 100000000000000000000001 /* Project object */;
+}

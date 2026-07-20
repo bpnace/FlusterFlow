@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.flusterflow.invalid/schemas/target-harness-result-v1.json",
+  "title": "FlusterFlow target harness result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "harnessId",
+    "runId",
+    "scenarioId",
+    "surface",
+    "status",
+    "outcome",
+    "confirmedMutation",
+    "pasteboardChanged",
+    "assertions"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "harnessId": { "const": "E-TARGET-HARNESS" },
+    "runId": { "type": "string", "minLength": 1 },
+    "scenarioId": { "type": "string", "minLength": 1 },
+    "surface": { "type": "string", "minLength": 1 },
+    "status": {
+      "enum": ["passed", "failed", "manual", "tccRequired"]
+    },
+    "outcome": {
+      "enum": [
+        "directAX",
+        "validatedAXValue",
+        "guardedCGEvent",
+        "guardedPaste",
+        "safeFallback",
+        "insertionDenied",
+        "ignoredStaleSession",
+        "contextOnly"
+      ]
+    },
+    "confirmedMutation": { "type": "boolean" },
+    "pasteboardChanged": { "type": "boolean" },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "passed", "detail"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "passed": { "type": "boolean" },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "residual": { "type": ["string", "null"] }
+  }
+}
