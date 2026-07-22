@@ -43,7 +43,7 @@ enum WhisperKitRecognizerError: Error, Equatable, Sendable {
 
 extension WhisperKitRecognizerError: SpeechRecognitionFailureClassifying {
     var indicatesNoSpeech: Bool {
-        self == .emptyTranscription
+        false
     }
 }
 
@@ -64,14 +64,9 @@ enum WhisperKitFailureCode: String, Equatable, Sendable {
 
 actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
     static let promptTokenBudget = 128
-    private static let incrementalInitialSampleCount = Int(1.5 * 16_000)
-    private static let incrementalAdditionalSampleCount = Int(2.0 * 16_000)
 
     private struct IncrementalSession: Sendable {
-        var samples: [Float]
-        let language: WhisperKitLanguageMode
-        let promptTokens: [Int]
-        var lastDecodedSampleCount: Int
+        var acceptedSampleCount: Int
     }
 
     private struct PrewarmOperation: Sendable {
@@ -132,16 +127,12 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
             throw WhisperKitRecognizerError.emptyAudio
         }
 
-        let promptTokens = try await runtime.prioritizedPromptTokens(
-            for: hints.decoderPromptTerms,
-            maxTokens: Self.promptTokenBudget
-        )
         let result: WhisperKitRecognitionResult
         do {
             result = try await runtime.transcribe(
                 samples: audioSamples.values,
                 language: Self.languageMode(for: hints.language),
-                promptTokens: promptTokens,
+                promptTokens: [],
                 sessionID: sessionID
             )
         } catch is CancellationError {
@@ -190,17 +181,9 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
         hints: RecognitionHints,
         sessionID: DictationSessionID
     ) async throws {
+        _ = hints
         try await prewarm()
-        let promptTokens = try await runtime.prioritizedPromptTokens(
-            for: hints.decoderPromptTerms,
-            maxTokens: Self.promptTokenBudget
-        )
-        incrementalSessions[sessionID] = IncrementalSession(
-            samples: [],
-            language: Self.languageMode(for: hints.language),
-            promptTokens: promptTokens,
-            lastDecodedSampleCount: 0
-        )
+        incrementalSessions[sessionID] = IncrementalSession(acceptedSampleCount: 0)
     }
 
     func updateRecognitionSession(
@@ -218,30 +201,8 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
             return .ignoredBatchRecognizer
         }
 
-        incremental.samples.append(contentsOf: chunk.samples)
-        let requiredSampleCount = incremental.lastDecodedSampleCount == 0
-            ? Self.incrementalInitialSampleCount
-            : incremental.lastDecodedSampleCount + Self.incrementalAdditionalSampleCount
-        guard incremental.samples.count >= requiredSampleCount else {
-            incrementalSessions[sessionID] = incremental
-            return .accepted
-        }
-
-        incremental.lastDecodedSampleCount = incremental.samples.count
+        incremental.acceptedSampleCount += chunk.samples.count
         incrementalSessions[sessionID] = incremental
-        do {
-            _ = try await runtime.transcribe(
-                samples: incremental.samples,
-                language: incremental.language,
-                promptTokens: incremental.promptTokens,
-                sessionID: sessionID
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            // Incremental decoding is an in-memory latency optimization. A
-            // preview failure must never prevent the canonical final decode.
-        }
         return .accepted
     }
 
@@ -478,7 +439,11 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
         for term in terms {
             let normalized = term.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalized.isEmpty else { continue }
-            let candidate = tokenizer.encode(text: normalized)
+            let candidate = Self.promptTokens(
+                for: normalized,
+                specialTokenBegin: tokenizer.specialTokens.specialTokenBegin,
+                encodedBy: tokenizer.encode(text:)
+            )
             guard !candidate.isEmpty,
                   promptTokens.count + candidate.count <= maxTokens else {
                 continue
@@ -486,6 +451,14 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
             promptTokens.append(contentsOf: candidate)
         }
         return promptTokens
+    }
+
+    nonisolated static func promptTokens(
+        for normalizedTerm: String,
+        specialTokenBegin: Int,
+        encodedBy encode: (String) -> [Int]
+    ) -> [Int] {
+        encode(" " + normalizedTerm).filter { $0 < specialTokenBegin }
     }
 
     func transcribe(
@@ -504,36 +477,12 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
         let options = Self.decodingOptions(language: language, promptTokens: promptTokens)
 
         let task = Task<WhisperKitRecognitionResult, Error> {
-            let initialResults = try await runtime.whisperKit.transcribe(
+            let results = try await runtime.whisperKit.transcribe(
                 audioArray: samples,
                 decodeOptions: options
             )
             try Task.checkCancellation()
-            let initialResult = Self.recognitionResult(
-                from: initialResults,
-                recoveredFromNoSpeech: false
-            )
-            guard initialResult.text.isEmpty else {
-                return initialResult
-            }
-
-            // Local VAD has already established at least 250 ms of speech.
-            // If Whisper's no-speech token still suppresses the entire result,
-            // retry once without that gate and with the simpler untimestamped
-            // decode. This is bounded to the empty-result path only.
-            let recoveryResults = try await runtime.whisperKit.transcribe(
-                audioArray: samples,
-                decodeOptions: Self.decodingOptions(
-                    language: language,
-                    promptTokens: promptTokens,
-                    recoveringFromEmptyTranscription: true
-                )
-            )
-            try Task.checkCancellation()
-            return Self.recognitionResult(
-                from: recoveryResults,
-                recoveredFromNoSpeech: true
-            )
+            return Self.recognitionResult(from: results)
         }
         activeTasks[sessionID] = task
         defer { activeTasks[sessionID] = nil }
@@ -549,9 +498,9 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
 
     nonisolated static func decodingOptions(
         language: WhisperKitLanguageMode,
-        promptTokens: [Int],
-        recoveringFromEmptyTranscription: Bool = false
+        promptTokens: [Int]
     ) -> DecodingOptions {
+        _ = promptTokens
         let languageCode: String?
         let detectLanguage: Bool
         switch language {
@@ -568,18 +517,20 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
         return DecodingOptions(
             task: .transcribe,
             language: languageCode,
+            temperatureFallbackCount: 0,
+            sampleLength: 128,
             detectLanguage: detectLanguage,
-            withoutTimestamps: recoveringFromEmptyTranscription,
-            wordTimestamps: !recoveringFromEmptyTranscription,
+            withoutTimestamps: true,
+            wordTimestamps: false,
             windowClipTime: 0,
-            promptTokens: promptTokens,
-            noSpeechThreshold: recoveringFromEmptyTranscription ? nil : 0.6
+            promptTokens: [],
+            firstTokenLogProbThreshold: nil,
+            noSpeechThreshold: nil
         )
     }
 
     private nonisolated static func recognitionResult(
-        from results: [TranscriptionResult],
-        recoveredFromNoSpeech: Bool
+        from results: [TranscriptionResult]
     ) -> WhisperKitRecognitionResult {
         let text = results
             .map(\.text)
@@ -589,13 +540,9 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
         let temperatureFallbackCount = results.reduce(0) {
             $0 + Int($1.timings.totalDecodingFallbacks.rounded(.towardZero))
         }
-        let totalFallbackCount = temperatureFallbackCount + (recoveredFromNoSpeech ? 1 : 0)
         var fallbackReasons: [String] = []
         if temperatureFallbackCount > 0 {
             fallbackReasons.append("temperatureFallback")
-        }
-        if recoveredFromNoSpeech {
-            fallbackReasons.append("noSpeechRecovery")
         }
         return WhisperKitRecognitionResult(
             text: text,
@@ -604,8 +551,8 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
             minWordProbability: Self.minimumWordProbability(segments),
             compressionRatio: segments.map(\.compressionRatio).max(),
             decoderFallback: RecognitionDecoderFallback(
-                occurred: totalFallbackCount > 0,
-                count: totalFallbackCount,
+                occurred: temperatureFallbackCount > 0,
+                count: temperatureFallbackCount,
                 reasons: fallbackReasons
             )
         )

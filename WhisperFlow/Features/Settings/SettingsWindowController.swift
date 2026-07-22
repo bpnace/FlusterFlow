@@ -6,7 +6,6 @@ final class SettingsWindowController: NSWindowController {
     init(
         store: SettingsStore,
         permissions: PermissionCenter,
-        microphones: MicrophoneCatalog,
         apiKey: APIKeySettingsModel,
         model: ModelProvisioningViewModel,
         diagnostics: DiagnosticsViewModel,
@@ -15,7 +14,6 @@ final class SettingsWindowController: NSWindowController {
         let view = LocalSettingsView(
             store: store,
             permissions: permissions,
-            microphones: microphones,
             apiKey: apiKey,
             model: model,
             diagnostics: diagnostics,
@@ -48,7 +46,6 @@ final class SettingsWindowController: NSWindowController {
 private struct LocalSettingsView: View {
     @ObservedObject var store: SettingsStore
     @ObservedObject var permissions: PermissionCenter
-    @ObservedObject var microphones: MicrophoneCatalog
     @ObservedObject var apiKey: APIKeySettingsModel
     @ObservedObject var model: ModelProvisioningViewModel
     @ObservedObject var diagnostics: DiagnosticsViewModel
@@ -117,16 +114,10 @@ private struct LocalSettingsView: View {
                             .foregroundStyle(.orange)
                     }
 
-                    Picker("Mikrofon", selection: $store.selectedMicrophoneUID) {
-                        Text("Systemstandard (automatisch)").tag(String?.none)
-                        ForEach(microphones.devices) { device in
-                            Text(device.name).tag(Optional(device.id))
-                        }
+                    LabeledContent("Mikrofon") {
+                        Text("macOS-Systemeingabe")
+                            .foregroundStyle(.secondary)
                     }
-                    Button("Mikrofone aktualisieren") {
-                        microphones.refresh()
-                    }
-                    .controlSize(.small)
                 }
 
                 SettingsSection(title: "Lokales Modell") {
@@ -383,7 +374,6 @@ private struct LocalSettingsView: View {
         .frame(minWidth: 590, minHeight: 620)
         .task {
             permissions.refresh()
-            microphones.refresh()
             apiKey.refresh()
             model.refresh()
         }

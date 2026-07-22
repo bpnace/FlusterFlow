@@ -1,6 +1,4 @@
 @preconcurrency import AVFoundation
-@preconcurrency import AudioToolbox
-@preconcurrency import CoreAudio
 import Darwin
 import Foundation
 import Synchronization
@@ -10,7 +8,6 @@ enum AudioCaptureError: Error, Equatable, Sendable {
     case captureAlreadyActive
     case captureNotActive
     case inputUnavailable
-    case selectedInputUnavailable
     case deviceConfigurationChanged
     case maximumDurationExceeded
     case normalizationFailed
@@ -37,31 +34,24 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
     private let store: AudioBufferStore
     private let authorization: any MicrophoneAuthorizing
     private let notificationCenter: NotificationCenter
-    private let selectedInputUID: @Sendable () async -> String?
 
     private var engine: AVAudioEngine?
     private var accumulator: RealtimeCaptureBuffer?
+    private var completedAccumulators: [RealtimeCaptureBuffer] = []
     private var activeSessionID: DictationSessionID?
     private var configurationObserver: (any NSObjectProtocol)?
     private var terminalError: AudioCaptureError?
     private var tapInstalled = false
-    private var captureFormat: CaptureFormat?
-
-    private struct CaptureFormat: Equatable, Sendable {
-        let sampleRate: Double
-        let channelCount: Int
-    }
+    private var isRecoveringConfiguration = false
 
     init(
         store: AudioBufferStore,
         authorization: any MicrophoneAuthorizing = SystemMicrophoneAuthorization(),
-        notificationCenter: NotificationCenter = .default,
-        selectedInputUID: @escaping @Sendable () async -> String? = { nil }
+        notificationCenter: NotificationCenter = .default
     ) {
         self.store = store
         self.authorization = authorization
         self.notificationCenter = notificationCenter
-        self.selectedInputUID = selectedInputUID
     }
 
     func startCapture(for sessionID: DictationSessionID) async throws {
@@ -71,41 +61,27 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         guard await authorization.authorizationStatus() == .authorized else {
             throw AudioCaptureError.microphonePermissionDenied
         }
-
-        // A nil selection intentionally leaves the AVAudioEngine input device
-        // untouched. CoreAudio then follows the current macOS system input,
-        // including live switches between AirPods and the built-in microphone.
-        let requestedUID = await selectedInputUID()
-        try activateEngine(withUID: requestedUID, for: sessionID)
+        try activateEngine(for: sessionID)
         activeSessionID = sessionID
         terminalError = nil
     }
 
     func finishCapture(for sessionID: DictationSessionID) async throws -> AudioInput {
-        guard activeSessionID == sessionID, let accumulator else {
+        guard activeSessionID == sessionID else {
             throw AudioCaptureError.captureNotActive
         }
 
         stopEngine()
+        removeConfigurationObserver()
         defer { clearSession() }
 
-        if let terminalError {
-            throw terminalError
-        }
-
         do {
-            let snapshot = accumulator.snapshot()
-            guard snapshot.failure == nil else {
-                if snapshot.failure == .maximumDurationExceeded {
-                    throw AudioCaptureError.maximumDurationExceeded
-                }
-                if snapshot.failure == .formatChanged {
-                    throw AudioCaptureError.deviceConfigurationChanged
-                }
-                throw AudioCaptureError.normalizationFailed
-            }
-            guard !snapshot.maximumDurationExceeded else {
-                throw AudioCaptureError.maximumDurationExceeded
+            let snapshot = aggregateSnapshot()
+            if let finalizationError = Self.finalizationError(
+                for: snapshot,
+                terminalError: terminalError
+            ) {
+                throw finalizationError
             }
             let normalized = try PCMNormalizer.normalize(snapshot.chunks)
             return await store.store(normalized)
@@ -123,8 +99,10 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         guard activeSessionID == sessionID, let accumulator else {
             return nil
         }
+        let completedFrameOffset = completedCapturedFrameCount()
+        let localFrameOffset = max(0, frameOffset - completedFrameOffset)
         guard let snapshot = accumulator.incrementalSnapshot(
-            afterFrameOffset: frameOffset,
+            afterFrameOffset: localFrameOffset,
             minimumDurationSeconds: 0.5
         ) else {
             return nil
@@ -138,7 +116,7 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         guard !chunk.samples.isEmpty else { return nil }
         return IncrementalAudioBatch(
             chunk: chunk,
-            nextFrameOffset: snapshot.nextFrameOffset
+            nextFrameOffset: completedFrameOffset + snapshot.nextFrameOffset
         )
     }
 
@@ -152,33 +130,33 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         await store.release(input)
     }
 
-    private func revalidateConfiguration(for sessionID: DictationSessionID) {
-        guard activeSessionID == sessionID,
-              let engine,
-              let captureFormat else {
+    private func recoverFromConfigurationChange(for sessionID: DictationSessionID) async {
+        guard activeSessionID == sessionID, !isRecoveringConfiguration else {
             return
         }
-        let currentFormat = engine.inputNode.outputFormat(forBus: 0)
-        guard Self.configurationChangeRequiresTermination(
-            engineRunning: engine.isRunning,
-            expectedSampleRate: captureFormat.sampleRate,
-            expectedChannelCount: captureFormat.channelCount,
-            currentSampleRate: currentFormat.sampleRate,
-            currentChannelCount: Int(currentFormat.channelCount)
-        ) else {
-            return
-        }
-        terminalError = .deviceConfigurationChanged
+        isRecoveringConfiguration = true
+        defer { isRecoveringConfiguration = false }
+
+        preserveCurrentAccumulator()
         stopEngine()
+        removeConfigurationObserver()
+        engine = nil
+
+        do {
+            try activateEngine(for: sessionID)
+            terminalError = nil
+        } catch let error as AudioCaptureError {
+            terminalError = error
+        } catch {
+            terminalError = .inputUnavailable
+        }
     }
 
-    private func activateEngine(
-        withUID selectedUID: String?,
-        for sessionID: DictationSessionID
-    ) throws {
+    private func activateEngine(for sessionID: DictationSessionID) throws {
         let engine = AVAudioEngine()
-        if let selectedUID {
-            try Self.selectInputDevice(withUID: selectedUID, on: engine)
+        let remainingDuration = remainingCaptureDurationSeconds()
+        guard remainingDuration > 0 else {
+            throw AudioCaptureError.maximumDurationExceeded
         }
 
         let input = engine.inputNode
@@ -189,12 +167,12 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         guard let accumulator = RealtimeCaptureBuffer(
             sampleRate: inputFormat.sampleRate,
             channelCount: Int(inputFormat.channelCount),
-            maximumDurationSeconds: Self.maximumCaptureDurationSeconds
+            maximumDurationSeconds: remainingDuration
         ) else {
             throw AudioCaptureError.inputUnavailable
         }
 
-        input.installTap(onBus: 0, bufferSize: 2_048, format: inputFormat) { buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 512, format: inputFormat) { buffer, _ in
             _ = accumulator.append(buffer)
         }
         do {
@@ -211,10 +189,6 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
 
         self.engine = engine
         self.accumulator = accumulator
-        captureFormat = CaptureFormat(
-            sampleRate: inputFormat.sampleRate,
-            channelCount: Int(inputFormat.channelCount)
-        )
         tapInstalled = true
         configurationObserver = notificationCenter.addObserver(
             forName: .AVAudioEngineConfigurationChange,
@@ -223,29 +197,9 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         ) { [weak self] _ in
             Task {
                 try? await Task.sleep(for: .milliseconds(100))
-                await self?.revalidateConfiguration(for: sessionID)
+                await self?.recoverFromConfigurationChange(for: sessionID)
             }
         }
-    }
-
-    nonisolated static func configurationChangeRequiresTermination(
-        engineRunning: Bool,
-        expectedSampleRate: Double,
-        expectedChannelCount: Int,
-        currentSampleRate: Double,
-        currentChannelCount: Int
-    ) -> Bool {
-        guard engineRunning,
-              expectedSampleRate.isFinite,
-              expectedSampleRate > 0,
-              expectedChannelCount > 0,
-              currentSampleRate.isFinite,
-              currentSampleRate > 0,
-              currentChannelCount > 0 else {
-            return true
-        }
-        return abs(currentSampleRate - expectedSampleRate) >= 0.5
-            || currentChannelCount != expectedChannelCount
     }
 
     private func stopEngine() {
@@ -260,95 +214,90 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         }
     }
 
-    private func clearSession() {
+    private func preserveCurrentAccumulator() {
+        guard let accumulator else { return }
+        accumulator.seal()
+        completedAccumulators.append(accumulator)
+        self.accumulator = nil
+    }
+
+    private func removeConfigurationObserver() {
         if let configurationObserver {
             notificationCenter.removeObserver(configurationObserver)
         }
         configurationObserver = nil
+    }
+
+    private func aggregateSnapshot() -> RealtimeCaptureBuffer.Snapshot {
+        let snapshots = (completedAccumulators + [accumulator].compactMap { $0 })
+            .map { $0.snapshot() }
+        let chunks = snapshots.flatMap(\.chunks)
+        let failures = snapshots.compactMap(\.failure)
+        let failure = failures.first { $0 != .formatChanged }
+            ?? (chunks.isEmpty && failures.contains(.formatChanged) ? .formatChanged : nil)
+        return RealtimeCaptureBuffer.Snapshot(
+            chunks: chunks,
+            maximumDurationExceeded: snapshots.contains(where: \.maximumDurationExceeded),
+            // A format change is expected when macOS moves the system input.
+            // The closed segment stays valid and the new engine continues on
+            // the new format, so this must not become a terminal session error.
+            failure: failure,
+            capturedFrameCount: snapshots.reduce(0) { $0 + $1.capturedFrameCount },
+            capacity: snapshots.reduce(0) { $0 + $1.capacity }
+        )
+    }
+
+    nonisolated static func finalizationError(
+        for snapshot: RealtimeCaptureBuffer.Snapshot,
+        terminalError: AudioCaptureError?
+    ) -> AudioCaptureError? {
+        if snapshot.maximumDurationExceeded
+            || snapshot.failure == .maximumDurationExceeded {
+            return .maximumDurationExceeded
+        }
+        switch snapshot.failure {
+        case .maximumDurationExceeded:
+            return .maximumDurationExceeded
+        case .unsupportedBuffer, .writerDidNotQuiesce:
+            return .normalizationFailed
+        case .formatChanged:
+            return terminalError ?? (snapshot.chunks.isEmpty ? .deviceConfigurationChanged : nil)
+        case nil:
+            break
+        }
+        return terminalError
+    }
+
+    private func remainingCaptureDurationSeconds() -> TimeInterval {
+        Self.maximumCaptureDurationSeconds - completedCaptureDurationSeconds()
+    }
+
+    private func completedCaptureDurationSeconds() -> TimeInterval {
+        completedAccumulators
+            .map { $0.snapshot() }
+            .flatMap(\.chunks)
+            .reduce(0) { duration, chunk in
+                duration + (Double(chunk.monoSamples.count) / chunk.sampleRate)
+            }
+    }
+
+    private func completedCapturedFrameCount() -> Int {
+        completedAccumulators
+            .map { $0.snapshot() }
+            .reduce(0) { $0 + $1.capturedFrameCount }
+    }
+
+    private func clearSession() {
+        removeConfigurationObserver()
         engine = nil
         accumulator = nil
+        completedAccumulators.removeAll(keepingCapacity: false)
         activeSessionID = nil
         terminalError = nil
         tapInstalled = false
-        captureFormat = nil
+        isRecoveringConfiguration = false
     }
 
-    private nonisolated static func selectInputDevice(
-        withUID selectedUID: String,
-        on engine: AVAudioEngine
-    ) throws {
-        guard let deviceID = audioDeviceID(withUID: selectedUID),
-              let audioUnit = engine.inputNode.audioUnit else {
-            throw AudioCaptureError.selectedInputUnavailable
-        }
-        var mutableDeviceID = deviceID
-        let status = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &mutableDeviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard status == noErr else {
-            throw AudioCaptureError.selectedInputUnavailable
-        }
-    }
-
-    private nonisolated static func audioDeviceID(withUID selectedUID: String) -> AudioDeviceID? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var byteCount: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            0,
-            nil,
-            &byteCount
-        ) == noErr else {
-            return nil
-        }
-
-        let count = Int(byteCount) / MemoryLayout<AudioDeviceID>.size
-        var devices = [AudioDeviceID](repeating: 0, count: count)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            0,
-            nil,
-            &byteCount,
-            &devices
-        ) == noErr else {
-            return nil
-        }
-
-        for deviceID in devices {
-            var uidAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyDeviceUID,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            var uid: Unmanaged<CFString>?
-            var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-            guard AudioObjectGetPropertyData(
-                deviceID,
-                &uidAddress,
-                0,
-                nil,
-                &uidSize,
-                &uid
-            ) == noErr else {
-                continue
-            }
-            if uid?.takeUnretainedValue() as String? == selectedUID {
-                return deviceID
-            }
-        }
-        return nil
-    }
 }
 
 // AVAudioEngine invokes a tap serially. This is therefore a single-producer buffer:
@@ -386,6 +335,7 @@ final class RealtimeCaptureBuffer: @unchecked Sendable {
 
     static let maximumSupportedSampleRate: Double = 192_000
     static let maximumSupportedChannelCount = 32
+    static let maximumChannelSelectionSamples = 64
 
     private let sampleRate: Double
     private let channelCount: Int
@@ -482,13 +432,29 @@ final class RealtimeCaptureBuffer: @unchecked Sendable {
             return .maximumDurationExceeded
         }
 
-        let divisor = Float(channelCount)
-        for frame in 0..<frameCount {
-            var sum: Float = 0
+        var selectedChannel = 0
+        if channelCount > 1 {
+            let sampleStep = max(1, frameCount / Self.maximumChannelSelectionSamples)
+            var selectedEnergy = -Float.infinity
             for channel in 0..<channelCount {
-                sum += channelData[channel][frame]
+                var energy = Float(0)
+                var frame = 0
+                while frame < frameCount {
+                    let sample = channelData[channel][frame]
+                    if sample.isFinite {
+                        energy += sample * sample
+                    }
+                    frame += sampleStep
+                }
+                if energy > selectedEnergy {
+                    selectedEnergy = energy
+                    selectedChannel = channel
+                }
             }
-            let monoSample = sum / divisor
+        }
+        for frame in 0..<frameCount {
+            let sample = channelData[selectedChannel][frame]
+            let monoSample = sample.isFinite ? sample : 0
             storage.advanced(by: writeOffset + frame).initialize(to: monoSample)
         }
         writtenFrameCount.store(writeOffset + frameCount, ordering: .releasing)

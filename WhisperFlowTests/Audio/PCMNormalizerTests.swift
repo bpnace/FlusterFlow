@@ -87,6 +87,61 @@ final class PCMNormalizerTests: XCTestCase {
 
         XCTAssertTrue(result.timing.isSilent)
         XCTAssertTrue(result.values.isEmpty)
+        XCTAssertGreaterThan(result.timing.inputRMS, 0)
+        XCTAssertGreaterThan(result.timing.inputPeak, 0)
+    }
+
+    func testContinuousVoiceLikeSignalWithFlatWindowEnergyIsKept() throws {
+        let sampleRate = 16_000
+        let sampleCount = Int(Double(sampleRate) * 0.6)
+        let input = (0..<sampleCount).map { index -> Float in
+            index.isMultiple(of: 10) ? 0.004 : 0
+        }
+
+        let result = try PCMNormalizer.normalize([
+            CapturedAudioChunk(monoSamples: input, sampleRate: Double(sampleRate))
+        ])
+
+        XCTAssertFalse(result.timing.isSilent)
+        XCTAssertEqual(result.timing.detectedSpeechDurationSeconds, 0.6, accuracy: 0.001)
+        XCTAssertFalse(result.values.isEmpty)
+    }
+
+    func testIsolatedImpulseIsNotPromotedToSpeechByVoiceLikeFallback() throws {
+        var input = Array(repeating: Float(0), count: 16_000)
+        input[8_000] = 0.2
+
+        let result = try PCMNormalizer.normalize([
+            CapturedAudioChunk(monoSamples: input, sampleRate: 16_000)
+        ])
+
+        XCTAssertTrue(result.timing.isSilent)
+        XCTAssertTrue(result.values.isEmpty)
+    }
+
+    func testIsolatedEdgeNoiseDoesNotStretchFinalASRAudio() throws {
+        let sampleRate = 16_000.0
+        var input = silence(sampleRate: sampleRate, durationSeconds: 3.0)
+        input.overlay(
+            sineWave(sampleRate: sampleRate, durationSeconds: 0.02, amplitude: 0.04),
+            at: Int(sampleRate * 0.8)
+        )
+        input += sineWave(sampleRate: sampleRate, durationSeconds: 0.5, amplitude: 0.08)
+        input += silence(sampleRate: sampleRate, durationSeconds: 3.0)
+        input.overlay(
+            sineWave(sampleRate: sampleRate, durationSeconds: 0.02, amplitude: 0.04),
+            at: input.count - Int(sampleRate * 0.7)
+        )
+
+        let result = try PCMNormalizer.normalize([
+            CapturedAudioChunk(monoSamples: input, sampleRate: sampleRate)
+        ])
+
+        XCTAssertFalse(result.timing.isSilent)
+        XCTAssertGreaterThan(result.timing.leadingSilenceTrimmedSeconds, 2.8)
+        XCTAssertGreaterThan(result.timing.trailingSilenceTrimmedSeconds, 2.8)
+        XCTAssertLessThan(result.timing.processedDurationSeconds, 0.9)
+        XCTAssertEqual(result.timing.detectedSpeechDurationSeconds, 0.5, accuracy: 0.041)
     }
 
     func testInternalPauseIsPreservedBetweenSpeechEdges() throws {
@@ -107,7 +162,7 @@ final class PCMNormalizerTests: XCTestCase {
 
     func testLessThanMinimumSpeechIsMarkedSilentAndEmpty() throws {
         let input = silence(sampleRate: 16_000, durationSeconds: 0.1)
-            + sineWave(sampleRate: 16_000, durationSeconds: 0.22, amplitude: 0.08)
+            + sineWave(sampleRate: 16_000, durationSeconds: 0.08, amplitude: 0.08)
             + silence(sampleRate: 16_000, durationSeconds: 0.1)
 
         let result = try PCMNormalizer.normalize([
@@ -117,7 +172,55 @@ final class PCMNormalizerTests: XCTestCase {
         XCTAssertTrue(result.values.isEmpty)
         XCTAssertTrue(result.timing.isSilent)
         XCTAssertEqual(result.timing.detectedSpeechDurationSeconds, 0)
-        XCTAssertEqual(result.timing.originalDurationSeconds, 0.42, accuracy: 0.001)
+        XCTAssertEqual(result.timing.originalDurationSeconds, 0.28, accuracy: 0.001)
+    }
+
+    func testShortQuietUtteranceAboveMinimumIsKept() throws {
+        let belowMinimumInput = silence(sampleRate: 16_000, durationSeconds: 0.04)
+            + sineWave(sampleRate: 16_000, durationSeconds: 0.16, amplitude: 0.002)
+            + silence(sampleRate: 16_000, durationSeconds: 0.04)
+        let belowMinimumResult = try PCMNormalizer.normalize([
+            CapturedAudioChunk(monoSamples: belowMinimumInput, sampleRate: 16_000)
+        ])
+
+        XCTAssertTrue(belowMinimumResult.timing.isSilent)
+        XCTAssertTrue(belowMinimumResult.values.isEmpty)
+
+        let input = silence(sampleRate: 16_000, durationSeconds: 0.04)
+            + sineWave(sampleRate: 16_000, durationSeconds: 0.32, amplitude: 0.002)
+            + silence(sampleRate: 16_000, durationSeconds: 0.04)
+
+        let result = try PCMNormalizer.normalize([
+            CapturedAudioChunk(monoSamples: input, sampleRate: 16_000)
+        ])
+
+        XCTAssertFalse(result.timing.isSilent)
+        XCTAssertFalse(result.values.isEmpty)
+        XCTAssertGreaterThanOrEqual(result.timing.detectedSpeechDurationSeconds, 0.25)
+    }
+
+    func testRouteChangeChunksWithDifferentSampleRatesArePreserved() throws {
+        let first = sineWave(sampleRate: 48_000, durationSeconds: 0.18, amplitude: 0.05)
+        let second = sineWave(sampleRate: 24_000, durationSeconds: 0.18, amplitude: 0.05)
+        let firstRealtimeChunks = stride(from: 0, to: first.count, by: 512).map { start in
+            CapturedAudioChunk(
+                monoSamples: Array(first[start..<min(start + 512, first.count)]),
+                sampleRate: 48_000
+            )
+        }
+        let secondRealtimeChunks = stride(from: 0, to: second.count, by: 512).map { start in
+            CapturedAudioChunk(
+                monoSamples: Array(second[start..<min(start + 512, second.count)]),
+                sampleRate: 24_000
+            )
+        }
+
+        let result = try PCMNormalizer.normalize(firstRealtimeChunks + secondRealtimeChunks)
+
+        XCTAssertFalse(result.timing.isSilent)
+        XCTAssertEqual(result.sampleRate, 16_000)
+        XCTAssertEqual(result.timing.originalDurationSeconds, 0.36, accuracy: 0.001)
+        XCTAssertEqual(result.values.count, 5_760, accuracy: 4)
     }
 
     func testStreamingChunkResamplesWithoutApplyingFinalVADCutoff() throws {
@@ -158,5 +261,14 @@ final class PCMNormalizerTests: XCTestCase {
     private func mean(_ samples: [Float]) -> Float {
         guard !samples.isEmpty else { return 0 }
         return samples.reduce(0, +) / Float(samples.count)
+    }
+}
+
+private extension Array where Element == Float {
+    mutating func overlay(_ samples: [Float], at offset: Int) {
+        guard offset >= 0 else { return }
+        for index in samples.indices where offset + index < count {
+            self[offset + index] += samples[index]
+        }
     }
 }

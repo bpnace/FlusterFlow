@@ -21,6 +21,10 @@ actor DictationCoordinator {
     private var session: DictationSession?
     private var insertionCancellationRequest: InsertionCancellationRequest?
     private var incrementalRecognitionTasks: [DictationSessionID: Task<Void, Never>] = [:]
+    private var incrementalRecognitionReceivedAudio: Set<DictationSessionID> = []
+    private var contextEnrichmentTasks: [
+        DictationSessionID: Task<CapturedTargetContext, Never>
+    ] = [:]
 
     init(
         contextProvider: any TargetContextProviding,
@@ -66,9 +70,9 @@ actor DictationCoordinator {
         )
         phase = .priming
 
-        let capturedTargetContext: CapturedTargetContext
+        let capturedTarget: CapturedTargetContext
         do {
-            capturedTargetContext = try await contextProvider.capture(for: sessionID)
+            capturedTarget = try await contextProvider.captureTarget(for: sessionID)
         } catch {
             return await failCurrent(sessionID, at: .context)
         }
@@ -76,11 +80,11 @@ actor DictationCoordinator {
         guard isCurrent(sessionID, expected: .priming) else {
             return .ignoredStale(sessionID)
         }
-        guard capturedTargetContext.target.isRegistered,
-              capturedTargetContext.context.availability != .deniedSensitive else {
+        guard capturedTarget.target.isRegistered,
+              capturedTarget.context.availability != .deniedSensitive else {
             return await failCurrent(sessionID, at: .context)
         }
-        session?.capturedTargetContext = capturedTargetContext
+        session?.capturedTargetContext = capturedTarget
 
         do {
             try await audioCapture.startCapture(for: sessionID)
@@ -94,6 +98,17 @@ actor DictationCoordinator {
         }
 
         phase = .listening
+        let contextProvider = contextProvider
+        contextEnrichmentTasks[sessionID] = Task {
+            do {
+                return try await contextProvider.enrichContext(
+                    for: capturedTarget,
+                    sessionID: sessionID
+                )
+            } catch {
+                return capturedTarget
+            }
+        }
         return .started(sessionID)
     }
 
@@ -133,6 +148,7 @@ actor DictationCoordinator {
                     if disposition == .ignoredBatchRecognizer {
                         return
                     }
+                    self.recordIncrementalRecognitionAudio(sessionID)
                 }
             } catch is CancellationError {
                 return
@@ -171,12 +187,12 @@ actor DictationCoordinator {
         }
         session?.audioInput = audio
 
-        guard let capturedTargetContext = session?.capturedTargetContext,
+        guard let capturedTargetContext = await resolvedContext(for: sessionID),
               let language = session?.language else {
             return await failStop(sessionID, at: .context)
         }
 
-        guard audio.hasDetectedSpeech else {
+        guard shouldAttemptTranscription(audio) else {
             return await finishAsNoSpeech(sessionID)
         }
 
@@ -187,7 +203,8 @@ actor DictationCoordinator {
 
         let transcript: RawTranscript
         do {
-            if let lifecycle = recognizer as? any SpeechRecognitionLifecycle {
+            if let lifecycle = recognizer as? any SpeechRecognitionLifecycle,
+               incrementalRecognitionReceivedAudio.remove(sessionID) != nil {
                 transcript = try await lifecycle.finalizeRecognitionSession(
                     audio,
                     hints: hints,
@@ -257,6 +274,7 @@ actor DictationCoordinator {
                 finalCandidate = .local(
                     await locallyRewritten(
                         localCandidate,
+                        transcript: transcript,
                         language: language,
                         context: capturedTargetContext.context,
                         sessionID: sessionID
@@ -270,6 +288,7 @@ actor DictationCoordinator {
             finalCandidate = .local(
                 await locallyRewritten(
                     localCandidate,
+                    transcript: transcript,
                     language: language,
                     context: capturedTargetContext.context,
                     sessionID: sessionID
@@ -461,6 +480,8 @@ actor DictationCoordinator {
 
     private func releaseSessionResources(_ sessionID: DictationSessionID) async {
         await stopIncrementalRecognition(sessionID)
+        incrementalRecognitionReceivedAudio.remove(sessionID)
+        contextEnrichmentTasks.removeValue(forKey: sessionID)?.cancel()
         async let cancelContext: Void = contextProvider.cancel(sessionID: sessionID)
         async let cancelAudio: Void = audioCapture.cancelCapture(for: sessionID)
         async let cancelRecognition: Void = recognizer.cancel(sessionID: sessionID)
@@ -479,6 +500,20 @@ actor DictationCoordinator {
         )
     }
 
+    private func resolvedContext(
+        for sessionID: DictationSessionID
+    ) async -> CapturedTargetContext? {
+        guard session?.id == sessionID else { return nil }
+        let fallback = session?.capturedTargetContext
+        guard let task = contextEnrichmentTasks.removeValue(forKey: sessionID) else {
+            return fallback
+        }
+        let enriched = await task.value
+        guard session?.id == sessionID else { return nil }
+        session?.capturedTargetContext = enriched
+        return enriched
+    }
+
     private func stopIncrementalRecognition(_ sessionID: DictationSessionID) async {
         guard let task = incrementalRecognitionTasks.removeValue(forKey: sessionID) else {
             return
@@ -488,6 +523,28 @@ actor DictationCoordinator {
             await lifecycle.stopRecognitionSession(sessionID: sessionID)
         }
         await task.value
+    }
+
+    private func recordIncrementalRecognitionAudio(_ sessionID: DictationSessionID) {
+        guard isCurrent(sessionID, expected: .listening) else { return }
+        incrementalRecognitionReceivedAudio.insert(sessionID)
+    }
+
+    private func shouldAttemptTranscription(_ audio: AudioInput) -> Bool {
+        guard let timing = audio.timing else { return true }
+        if !timing.isSilent {
+            return true
+        }
+        if timing.processedDurationSeconds <= 0.05 {
+            return false
+        }
+        if timing.inputPeak <= 0 && timing.normalizedPeak <= 0 {
+            return false
+        }
+        if timing.inputRMS <= 0 && timing.normalizedRMS <= 0 {
+            return false
+        }
+        return true
     }
 
     private func recognitionHints(
@@ -507,11 +564,19 @@ actor DictationCoordinator {
 
     private func locallyRewritten(
         _ candidate: LocalCandidate,
+        transcript: RawTranscript,
         language: DictationLanguage,
         context: ContextSnapshot,
         sessionID: DictationSessionID
     ) async -> LocalCandidate {
         guard let localRewriter else { return candidate }
+        if shouldUseDeterministicCandidateWithoutRewrite(
+            candidate,
+            transcript: transcript,
+            context: context
+        ) {
+            return candidate
+        }
         let result = await localRewriter.rewrite(
             TextRewriteRequest(
                 sessionID: sessionID,
@@ -522,6 +587,179 @@ actor DictationCoordinator {
         )
         guard result.outcome == .accepted else { return candidate }
         return LocalCandidate(text: result.outputText)
+    }
+
+    private func shouldUseDeterministicCandidateWithoutRewrite(
+        _ candidate: LocalCandidate,
+        transcript: RawTranscript,
+        context: ContextSnapshot
+    ) -> Bool {
+        let hasHighConfidenceSignal = transcript.avgLogprob != nil
+            || transcript.minWordProbability != nil
+        guard hasHighConfidenceSignal else { return false }
+        if let avgLogprob = transcript.avgLogprob, avgLogprob < -0.4 {
+            return false
+        }
+        if let minWordProbability = transcript.minWordProbability,
+           minWordProbability < 0.8 {
+            return false
+        }
+        guard let compressionRatio = transcript.compressionRatio,
+              compressionRatio <= 2.2 else {
+            return false
+        }
+        guard let decoderFallback = transcript.decoderFallback,
+              decoderFallback.occurred == false else {
+            return false
+        }
+        if transcript.adaptive?.fallbackReasons.isEmpty == false { return false }
+        if contextReferenceCanAffectRewrite(
+            candidate: candidate.text,
+            transcript: transcript.text,
+            context: context
+        ) {
+            return false
+        }
+        return isStructurallyCoherentForFastPath(candidate.text)
+            && isStructurallyCoherentForFastPath(transcript.text)
+            && !hasSuspiciousRecognitionDamage(transcript.text)
+            && !hasSuspiciousRecognitionDamage(candidate.text)
+    }
+
+    private func isStructurallyCoherentForFastPath(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 8,
+              trimmed.last.map({ ".!?".contains($0) }) == true else {
+            return false
+        }
+        let words = recognitionFastPathWords(in: trimmed)
+        guard words.count >= 2 else { return false }
+        let unfinishedEndings: Set<String> = [
+            "and", "or", "but", "because", "if", "then",
+            "und", "oder", "aber", "weil", "wenn", "dann"
+        ]
+        guard let last = words.last, !unfinishedEndings.contains(last) else {
+            return false
+        }
+        let fragmentStarts: Set<String> = [
+            "and", "or", "but", "und", "oder", "aber"
+        ]
+        guard let first = words.first, !fragmentStarts.contains(first) else {
+            return false
+        }
+        if startsWithIncompleteSubordinateClause(trimmed, firstWord: first) {
+            return false
+        }
+        return true
+    }
+
+    private func startsWithIncompleteSubordinateClause(
+        _ text: String,
+        firstWord: String
+    ) -> Bool {
+        let subordinateStarts: Set<String> = [
+            "because", "if", "weil", "wenn", "falls", "obwohl"
+        ]
+        guard subordinateStarts.contains(firstWord) else { return false }
+        return !text.contains(",")
+    }
+
+    private func contextReferenceCanAffectRewrite(
+        candidate: String,
+        transcript: String,
+        context: ContextSnapshot
+    ) -> Bool {
+        guard context.availability == .available,
+              let boundedText = context.boundedText,
+              !boundedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        let text = "\(transcript)\n\(candidate)"
+        return hasContextReference(in: text, for: .project)
+            && hasContextDefinition(in: boundedText, for: .project)
+            || hasContextReference(in: text, for: .task)
+                && hasContextDefinition(in: boundedText, for: .task)
+    }
+
+    private enum ContextReferenceKind {
+        case project
+        case task
+    }
+
+    private func hasContextReference(
+        in text: String,
+        for kind: ContextReferenceKind
+    ) -> Bool {
+        let patterns: [String]
+        switch kind {
+        case .project:
+            patterns = [
+                #"(?i)\b(?:das|dieses|dem|diesem|jenes)\s+projekt\b"#,
+                #"(?i)\b(?:this|that)\s+project\b"#
+            ]
+        case .task:
+            patterns = [
+                #"(?i)\b(?:die|diese|der|dieser|jene)\s+aufgabe\b"#,
+                #"(?i)\b(?:this|that)\s+task\b"#
+            ]
+        }
+        return patterns.contains { pattern in
+            text.range(of: pattern, options: .regularExpression) != nil
+        }
+    }
+
+    private func hasContextDefinition(
+        in text: String,
+        for kind: ContextReferenceKind
+    ) -> Bool {
+        let patterns: [String]
+        switch kind {
+        case .project:
+            patterns = [
+                #"\b(?i:(?:das\s+)?projekt\s+(?:heißt|heisst|ist|namens))\s+([A-ZÄÖÜ][\p{L}\p{M}\p{N}_-]*(?:\s+[A-ZÄÖÜ][\p{L}\p{M}\p{N}_-]*){0,2})"#,
+                #"\b(?i:projekt)\s*:\s*([A-ZÄÖÜ][\p{L}\p{M}\p{N}_-]*(?:\s+[A-ZÄÖÜ][\p{L}\p{M}\p{N}_-]*){0,2})"#,
+                #"\b(?i:project\s+(?:is|called|named))\s+([A-Z][\p{L}\p{M}\p{N}_-]*(?:\s+[A-Z][\p{L}\p{M}\p{N}_-]*){0,2})"#,
+                #"\b(?i:project)\s*:\s*([A-Z][\p{L}\p{M}\p{N}_-]*(?:\s+[A-Z][\p{L}\p{M}\p{N}_-]*){0,2})"#
+            ]
+        case .task:
+            patterns = [
+                #"\b(?i:(?:die\s+)?aufgabe\s+(?:heißt|heisst|ist|namens))\s+([A-ZÄÖÜ][\p{L}\p{M}\p{N}_-]*(?:\s+[A-ZÄÖÜ][\p{L}\p{M}\p{N}_-]*){0,2})"#,
+                #"\b(?i:aufgabe)\s*:\s*([A-ZÄÖÜ][\p{L}\p{M}\p{N}_-]*(?:\s+[A-ZÄÖÜ][\p{L}\p{M}\p{N}_-]*){0,2})"#,
+                #"\b(?i:task\s+(?:is|called|named))\s+([A-Z][\p{L}\p{M}\p{N}_-]*(?:\s+[A-Z][\p{L}\p{M}\p{N}_-]*){0,2})"#,
+                #"\b(?i:task)\s*:\s*([A-Z][\p{L}\p{M}\p{N}_-]*(?:\s+[A-Z][\p{L}\p{M}\p{N}_-]*){0,2})"#
+            ]
+        }
+        return patterns.contains { pattern in
+            text.range(of: pattern, options: .regularExpression) != nil
+        }
+    }
+
+    private func hasSuspiciousRecognitionDamage(_ text: String) -> Bool {
+        let words = recognitionFastPathWords(in: text)
+        guard words.count >= 3 else { return false }
+        for index in 0..<(words.count - 1) where words[index] == words[index + 1] {
+            return true
+        }
+        guard words.count >= 4 else { return false }
+        for length in 2...min(4, words.count / 2) {
+            for index in 0...(words.count - length * 2) {
+                let first = words[index..<(index + length)]
+                let second = words[(index + length)..<(index + length * 2)]
+                if Array(first) == Array(second) { return true }
+            }
+        }
+        return false
+    }
+
+    private func recognitionFastPathWords(in text: String) -> [String] {
+        let pattern = #"[\p{L}\p{N}][\p{L}\p{N}'_-]*"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return []
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.matches(in: text, range: range).compactMap { match in
+            Range(match.range, in: text).map { String(text[$0]).lowercased() }
+        }
     }
 }
 

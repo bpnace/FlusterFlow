@@ -2,7 +2,25 @@ import Foundation
 
 protocol TargetContextProviding: Sendable {
     func capture(for sessionID: DictationSessionID) async throws -> CapturedTargetContext
+    func captureTarget(for sessionID: DictationSessionID) async throws -> CapturedTargetContext
+    func enrichContext(
+        for captured: CapturedTargetContext,
+        sessionID: DictationSessionID
+    ) async throws -> CapturedTargetContext
     func cancel(sessionID: DictationSessionID) async
+}
+
+extension TargetContextProviding {
+    func captureTarget(for sessionID: DictationSessionID) async throws -> CapturedTargetContext {
+        try await capture(for: sessionID)
+    }
+
+    func enrichContext(
+        for captured: CapturedTargetContext,
+        sessionID _: DictationSessionID
+    ) async throws -> CapturedTargetContext {
+        captured
+    }
 }
 
 protocol AudioCapturing: Sendable {

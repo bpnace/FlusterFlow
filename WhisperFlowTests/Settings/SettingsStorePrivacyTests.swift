@@ -24,33 +24,13 @@ final class SettingsStorePrivacyTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
-    func testMicrophoneSelectionRemainsInMemoryAndIsNotWrittenToDefaults() {
-        withIsolatedDefaults { defaults in
-            let selectedUID = "forbidden-device-uid-123"
-            let settings = SettingsStore(defaults: defaults)
-
-            settings.selectedMicrophoneUID = selectedUID
-
-            XCTAssertEqual(settings.selectedMicrophoneUID, selectedUID)
-            XCTAssertNil(defaults.object(forKey: Self.legacyMicrophoneKey))
-            XCTAssertFalse(defaults.dictionaryRepresentation().values.contains {
-                $0 as? String == selectedUID
-            })
-
-            let restartedSettings = SettingsStore(defaults: defaults)
-            XCTAssertNil(restartedSettings.selectedMicrophoneUID)
-        }
-    }
-
-    @MainActor
     func testInitializationScrubsLegacyMicrophoneIdentifier() {
         withIsolatedDefaults { defaults in
             let legacyUID = "legacy-device-uid-456"
             defaults.set(legacyUID, forKey: Self.legacyMicrophoneKey)
 
-            let settings = SettingsStore(defaults: defaults)
+            _ = SettingsStore(defaults: defaults)
 
-            XCTAssertNil(settings.selectedMicrophoneUID)
             XCTAssertNil(defaults.object(forKey: Self.legacyMicrophoneKey))
             XCTAssertFalse(defaults.dictionaryRepresentation().values.contains {
                 $0 as? String == legacyUID

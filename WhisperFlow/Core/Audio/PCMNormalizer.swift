@@ -13,13 +13,21 @@ enum PCMNormalizerError: Error, Equatable, Sendable {
 }
 
 enum PCMNormalizer {
+    // WhisperKit's final decoder needs at least a quarter second of detected
+    // speech for a reliable first token. Keeping this gate aligned prevents a
+    // short residual fragment from being admitted as speech and then decoded
+    // as an empty transcription.
     private static let minimumSpeechDurationSeconds = 0.250
     private static let vadWindowSeconds = 0.020
     private static let vadContextPaddingSeconds = 0.150
-    private static let vadMinimumRMS: Float = 0.0015
-    private static let vadMinimumAdaptiveMarginRMS: Float = 0.0005
+    private static let vadMinimumRMS: Float = 0.0008
+    private static let vadMinimumAdaptiveMarginRMS: Float = 0.00025
     private static let vadDynamicRangeFraction: Float = 0.35
     private static let vadMaximumAdaptiveRMS: Float = 0.02
+    private static let vadMaximumSpeechIslandGapSeconds = 0.180
+    private static let vadMinimumSpeechIslandSeconds = 0.100
+    private static let vadVoiceLikeFallbackMinimumPeak: Float = 0.002
+    private static let vadVoiceLikeFallbackMinimumCrestFactor: Float = 2.5
     private static let normalizationTargetRMS: Float = 0.08
     private static let normalizationTargetPeak: Float = 0.8
     private static let maximumGain: Float = 12
@@ -31,37 +39,48 @@ enum PCMNormalizer {
         guard outputSampleRate > 0 else {
             throw PCMNormalizerError.invalidSampleRate
         }
-        guard let firstRate = chunks.first?.sampleRate else {
+        guard !chunks.isEmpty else {
             return AudioSamples(values: [], sampleRate: outputSampleRate)
         }
-        guard firstRate.isFinite, firstRate > 0 else {
+        guard chunks.allSatisfy({ $0.sampleRate.isFinite && $0.sampleRate > 0 }) else {
             throw PCMNormalizerError.invalidSampleRate
-        }
-        guard chunks.allSatisfy({ abs($0.sampleRate - firstRate) < 0.5 }) else {
-            throw PCMNormalizerError.inconsistentInputRates
         }
 
         let input = chunks.flatMap(\.monoSamples)
+        let originalDurationSeconds = chunks.reduce(0) { duration, chunk in
+            duration + (Double(chunk.monoSamples.count) / chunk.sampleRate)
+        }
         guard !input.isEmpty else {
             return silentSamples(
                 outputSampleRate: outputSampleRate,
-                originalDurationSeconds: 0,
+                originalDurationSeconds: originalDurationSeconds,
                 removedDCOffset: 0
             )
         }
-        let originalDurationSeconds = Double(input.count) / firstRate
         let dcOffset = mean(of: input)
-        let centeredInput = input.map { sample in
-            clamp(sample.isFinite ? sample - dcOffset : 0)
-        }
-
-        let resampled = try resample(
-            centeredInput,
-            inputSampleRate: firstRate,
-            outputSampleRate: outputSampleRate
+        var resampled: [Float] = []
+        resampled.reserveCapacity(
+            Int((originalDurationSeconds * Double(outputSampleRate)).rounded(.up))
         )
+        // AVAudioConverter is stateful. Coalesce the tiny, contiguous tap
+        // buffers that share a sample rate so its filter state spans the
+        // recording instead of restarting every 512 frames.
+        for chunk in coalescedChunks(chunks) {
+            let centered = chunk.monoSamples.map { sample in
+                clamp(sample.isFinite ? sample - dcOffset : 0)
+            }
+            resampled.append(
+                contentsOf: try resample(
+                    centered,
+                    inputSampleRate: chunk.sampleRate,
+                    outputSampleRate: outputSampleRate
+                )
+            )
+        }
         let vadClock = ContinuousClock()
         let vadStartedAt = vadClock.now
+        let preVADRMS = rms(resampled[...])
+        let preVADPeak = resampled.reduce(Float(0)) { max($0, abs($1)) }
         let analysis = analyzeSpeech(in: resampled, sampleRate: outputSampleRate)
         let vadProcessingMilliseconds = milliseconds(
             vadStartedAt.duration(to: vadClock.now)
@@ -72,7 +91,9 @@ enum PCMNormalizer {
                 outputSampleRate: outputSampleRate,
                 originalDurationSeconds: originalDurationSeconds,
                 removedDCOffset: dcOffset,
-                vadProcessingMilliseconds: vadProcessingMilliseconds
+                vadProcessingMilliseconds: vadProcessingMilliseconds,
+                inputRMS: preVADRMS,
+                inputPeak: preVADPeak
             )
         }
 
@@ -142,6 +163,40 @@ enum PCMNormalizer {
             sampleRate: outputSampleRate,
             channelCount: 1
         )
+    }
+
+    private static func coalescedChunks(
+        _ chunks: [CapturedAudioChunk]
+    ) -> [CapturedAudioChunk] {
+        guard let first = chunks.first else { return [] }
+
+        var result: [CapturedAudioChunk] = []
+        var currentSampleRate = first.sampleRate
+        var currentSamples: [Float] = []
+        currentSamples.reserveCapacity(first.monoSamples.count)
+
+        for chunk in chunks {
+            if abs(chunk.sampleRate - currentSampleRate) >= 0.5 {
+                result.append(
+                    CapturedAudioChunk(
+                        monoSamples: currentSamples,
+                        sampleRate: currentSampleRate
+                    )
+                )
+                currentSampleRate = chunk.sampleRate
+                currentSamples = []
+                currentSamples.reserveCapacity(chunk.monoSamples.count)
+            }
+            currentSamples.append(contentsOf: chunk.monoSamples)
+        }
+
+        result.append(
+            CapturedAudioChunk(
+                monoSamples: currentSamples,
+                sampleRate: currentSampleRate
+            )
+        )
+        return result
     }
 
     private static func resample(
@@ -246,20 +301,109 @@ enum PCMNormalizer {
             vadMaximumAdaptiveRMS
         )
         let speechThreshold = max(vadMinimumRMS, adaptiveThreshold)
-        let speechWindows = rmsWindows.enumerated().filter { $0.element.rms >= speechThreshold }
-        guard let firstSpeech = speechWindows.first,
-              let lastSpeech = speechWindows.last else {
-            return SpeechAnalysis(startIndex: 0, endIndex: 0, detectedSpeechDurationSeconds: 0)
+        let speechWindows = rmsWindows.filter { $0.rms >= speechThreshold }
+        let speechIslands = significantSpeechIslands(
+            from: speechWindows,
+            sampleRate: sampleRate
+        )
+        guard let firstSpeech = speechIslands.first,
+              let lastSpeech = speechIslands.last else {
+            let voiceLikeWindows = rmsWindows.filter { window in
+                guard window.rms >= vadMinimumRMS else { return false }
+                let peak = samples[window.range].reduce(Float(0)) { max($0, abs($1)) }
+                return peak >= max(
+                    vadVoiceLikeFallbackMinimumPeak,
+                    window.rms * vadVoiceLikeFallbackMinimumCrestFactor
+                )
+            }
+            let voiceLikeIslands = significantSpeechIslands(
+                from: voiceLikeWindows,
+                sampleRate: sampleRate
+            )
+            let voiceLikeFrameCount = voiceLikeIslands.reduce(0) {
+                $0 + $1.speechFrameCount
+            }
+            let voiceLikeDurationSeconds = Double(voiceLikeFrameCount) / Double(sampleRate)
+            guard let firstVoiceLikeIsland = voiceLikeIslands.first,
+                  let lastVoiceLikeIsland = voiceLikeIslands.last,
+                  voiceLikeDurationSeconds >= minimumSpeechDurationSeconds else {
+                return SpeechAnalysis(
+                    startIndex: 0,
+                    endIndex: 0,
+                    detectedSpeechDurationSeconds: 0
+                )
+            }
+            // Automatic microphone gain can make every analysis window look
+            // equally loud. Requiring repeated speech-like crest windows
+            // distinguishes that signal from stationary hum and isolated
+            // clicks without needing a leading silence calibration period.
+            return SpeechAnalysis(
+                startIndex: firstVoiceLikeIsland.range.lowerBound,
+                endIndex: lastVoiceLikeIsland.range.upperBound,
+                detectedSpeechDurationSeconds: voiceLikeDurationSeconds
+            )
         }
 
-        let speechFrameCount = speechWindows.reduce(0) { count, window in
-            count + window.element.range.count
+        let speechFrameCount = speechIslands.reduce(0) { count, island in
+            count + island.speechFrameCount
         }
         return SpeechAnalysis(
-            startIndex: firstSpeech.element.range.lowerBound,
-            endIndex: lastSpeech.element.range.upperBound,
+            startIndex: firstSpeech.range.lowerBound,
+            endIndex: lastSpeech.range.upperBound,
             detectedSpeechDurationSeconds: Double(speechFrameCount) / Double(sampleRate)
         )
+    }
+
+    private struct SpeechIsland {
+        let range: Range<Int>
+        let speechFrameCount: Int
+    }
+
+    private static func significantSpeechIslands(
+        from windows: [(range: Range<Int>, rms: Float)],
+        sampleRate: Int
+    ) -> [SpeechIsland] {
+        guard !windows.isEmpty else { return [] }
+
+        let maximumGapFrames = Int(
+            (Double(sampleRate) * vadMaximumSpeechIslandGapSeconds).rounded()
+        )
+        let minimumSpeechFrames = Int(
+            (Double(sampleRate) * vadMinimumSpeechIslandSeconds).rounded(.up)
+        )
+        var islands: [SpeechIsland] = []
+        var currentStart = windows[0].range.lowerBound
+        var currentEnd = windows[0].range.upperBound
+        var currentSpeechFrames = windows[0].range.count
+
+        for window in windows.dropFirst() {
+            if window.range.lowerBound - currentEnd <= maximumGapFrames {
+                currentEnd = window.range.upperBound
+                currentSpeechFrames += window.range.count
+            } else {
+                if currentSpeechFrames >= minimumSpeechFrames {
+                    islands.append(
+                        SpeechIsland(
+                            range: currentStart..<currentEnd,
+                            speechFrameCount: currentSpeechFrames
+                        )
+                    )
+                }
+                currentStart = window.range.lowerBound
+                currentEnd = window.range.upperBound
+                currentSpeechFrames = window.range.count
+            }
+        }
+
+        if currentSpeechFrames >= minimumSpeechFrames {
+            islands.append(
+                SpeechIsland(
+                    range: currentStart..<currentEnd,
+                    speechFrameCount: currentSpeechFrames
+                )
+            )
+        }
+        return islands
     }
 
     private static func normalizeLevel(_ samples: [Float]) -> (samples: [Float], gain: Float) {
@@ -285,7 +429,9 @@ enum PCMNormalizer {
         outputSampleRate: Int,
         originalDurationSeconds: Double,
         removedDCOffset: Float,
-        vadProcessingMilliseconds: Double = 0
+        vadProcessingMilliseconds: Double = 0,
+        inputRMS: Float = 0,
+        inputPeak: Float = 0
     ) -> AudioSamples {
         AudioSamples(
             values: [],
@@ -299,7 +445,9 @@ enum PCMNormalizer {
                 isSilent: true,
                 removedDCOffset: removedDCOffset,
                 appliedGain: 1,
-                vadProcessingMilliseconds: vadProcessingMilliseconds
+                vadProcessingMilliseconds: vadProcessingMilliseconds,
+                inputRMS: inputRMS,
+                inputPeak: inputPeak
             )
         )
     }

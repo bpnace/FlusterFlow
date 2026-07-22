@@ -1,0 +1,24 @@
+{
+  "configurations" : [
+    {
+      "id" : "5E9E86C2-F937-48C6-A769-1EE475E86F89",
+      "name" : "Full",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "testTimeoutsEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:WhisperFlow.xcodeproj",
+        "identifier" : "100000000000000000000402",
+        "name" : "WhisperFlowTests"
+      }
+    }
+  ],
+  "version" : 1
+}

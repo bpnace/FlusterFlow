@@ -44,15 +44,19 @@ final class AudioPlatformTests: XCTestCase, @unchecked Sendable {
         XCTAssertGreaterThan(result.values.reduce(Float(0)) { max($0, abs($1)) }, 0.1)
     }
 
-    func testNormalizerRejectsMidSessionFormatChanges() {
-        XCTAssertThrowsError(
-            try PCMNormalizer.normalize([
-                CapturedAudioChunk(monoSamples: [0], sampleRate: 48_000),
-                CapturedAudioChunk(monoSamples: [0], sampleRate: 44_100)
-            ])
-        ) { error in
-            XCTAssertEqual(error as? PCMNormalizerError, .inconsistentInputRates)
-        }
+    func testNormalizerPreservesSpeechAcrossMidSessionFormatChanges() throws {
+        let first = sineWave(sampleRate: 48_000, durationSeconds: 0.2, amplitude: 0.08)
+        let second = sineWave(sampleRate: 44_100, durationSeconds: 0.2, amplitude: 0.08)
+
+        let result = try PCMNormalizer.normalize([
+            CapturedAudioChunk(monoSamples: first, sampleRate: 48_000),
+            CapturedAudioChunk(monoSamples: second, sampleRate: 44_100)
+        ])
+
+        XCTAssertFalse(result.timing.isSilent)
+        XCTAssertEqual(result.sampleRate, 16_000)
+        XCTAssertEqual(result.timing.originalDurationSeconds, 0.4, accuracy: 0.001)
+        XCTAssertEqual(result.values.count, 6_400, accuracy: 4)
     }
 
     private func sineWave(

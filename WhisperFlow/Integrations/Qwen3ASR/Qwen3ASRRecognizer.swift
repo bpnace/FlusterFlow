@@ -36,7 +36,7 @@ enum Qwen3ASRRecognizerError: Error, Equatable, Sendable {
 
 extension Qwen3ASRRecognizerError: SpeechRecognitionFailureClassifying {
     var indicatesNoSpeech: Bool {
-        self == .emptyTranscription
+        false
     }
 }
 

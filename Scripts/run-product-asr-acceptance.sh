@@ -8,6 +8,9 @@ DERIVED_DATA="${FLUSTERFLOW_SMOKE_DERIVED_DATA:-/tmp/FlusterFlowProductSmokeDeri
 AUDIO_FILE=""
 GENERATED_AUDIO_FILE=""
 SMOKE_XCTESTRUN=""
+SMOKE_RESULT=""
+SMOKE_TEST_NAME="testInstalledAdaptiveWhisperRunsTheProductASRPathWhenExplicitlyRequested"
+SMOKE_TEST_IDENTIFIER="WhisperFlowTests/WhisperKitRecognizerTests/$SMOKE_TEST_NAME"
 
 cleanup() {
   if [ -n "$GENERATED_AUDIO_FILE" ]; then
@@ -16,8 +19,41 @@ cleanup() {
   if [ -n "$SMOKE_XCTESTRUN" ]; then
     rm -f "$SMOKE_XCTESTRUN"
   fi
+  if [ -n "$SMOKE_RESULT" ]; then
+    rm -f "$SMOKE_RESULT"
+  fi
 }
 trap cleanup EXIT
+
+product_asr_smoke_passed() {
+  local result_file="$1"
+
+  if awk -v test="$SMOKE_TEST_NAME" '
+    index($0, test) > 0 {
+      line = tolower($0)
+      if (line ~ /(skip|skipped|not[ -]?run|not executed)/) {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$result_file"; then
+    return 1
+  fi
+
+  awk -v test="$SMOKE_TEST_NAME" '
+    index($0, test) > 0 {
+      line = tolower($0)
+      if (line ~ /(passed|succeeded)/) {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$result_file"
+}
+
+if [ "${FLUSTERFLOW_PRODUCT_ASR_ACCEPTANCE_SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 if [ "$#" -gt 1 ]; then
   echo "Usage: $0 [local-audio-file]" >&2
@@ -42,6 +78,7 @@ fi
 /usr/bin/xcodebuild -quiet \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
+  -testPlan WhisperFlow-Full \
   -configuration Debug \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "$DERIVED_DATA" \
@@ -65,10 +102,16 @@ if ! /usr/libexec/PlistBuddy \
     "$SMOKE_XCTESTRUN"
 fi
 
-/usr/bin/xcodebuild -quiet \
+SMOKE_RESULT="$(mktemp /tmp/flusterflow-product-asr-result.XXXXXX)"
+/usr/bin/xcodebuild \
   -xctestrun "$SMOKE_XCTESTRUN" \
   -destination 'platform=macOS,arch=arm64' \
-  -only-testing:WhisperFlowTests/WhisperKitRecognizerTests/testInstalledAdaptiveWhisperRunsTheProductASRPathWhenExplicitlyRequested \
-  test-without-building
+  -only-testing:"$SMOKE_TEST_IDENTIFIER" \
+  test-without-building | tee "$SMOKE_RESULT"
+
+if ! product_asr_smoke_passed "$SMOKE_RESULT"; then
+  echo "Product ASR acceptance failed: the real model smoke did not execute successfully." >&2
+  exit 1
+fi
 
 echo "FlusterFlow product ASR acceptance: PASS"

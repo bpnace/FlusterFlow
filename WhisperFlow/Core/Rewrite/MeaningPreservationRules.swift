@@ -49,6 +49,13 @@ struct ContextSupportedMeaningPreservationRules: Sendable {
         ) {
             issues.append(.inventedClaim)
         }
+        if hasUnsupportedAppendedClause(
+            local: local,
+            proposed: proposed,
+            protectedContextTerms: protectedContextTerms
+        ) {
+            issues.append(.inventedClaim)
+        }
         let hasSourceLoss = hasSubstantialSourceLoss(
             local: local,
             proposed: proposed,
@@ -245,6 +252,34 @@ struct ContextSupportedMeaningPreservationRules: Sendable {
         return unsupported >= 2
     }
 
+    private func hasUnsupportedAppendedClause(
+        local: String,
+        proposed: String,
+        protectedContextTerms: [String]
+    ) -> Bool {
+        let localClauses = contentClauses(in: local)
+        let proposedClauses = contentClauses(in: proposed)
+        guard !localClauses.isEmpty,
+              proposedClauses.count > localClauses.count else {
+            return false
+        }
+
+        let supportTokens = contentTokens(in: local)
+            + protectedContextTerms.flatMap { lexicalTokens(in: $0) }
+        for clause in proposedClauses.dropFirst(localClauses.count) {
+            let unsupported = clause.tokens.filter { !isSupported($0, by: supportTokens) }
+            guard !unsupported.isEmpty else { continue }
+            if clause.tokens.count <= 4 || containsMetaAction(in: clause.text) {
+                return true
+            }
+            let coverage = Double(clause.tokens.count - unsupported.count) / Double(clause.tokens.count)
+            if coverage < 0.75 {
+                return true
+            }
+        }
+        return false
+    }
+
     private func hasSubstantialSourceLoss(
         local: String,
         proposed: String,
@@ -301,6 +336,26 @@ struct ContextSupportedMeaningPreservationRules: Sendable {
             clauses.append(source.substring(from: start))
         }
         return clauses
+    }
+
+    private func contentClauses(in text: String) -> [(text: String, tokens: [String])] {
+        clauses(in: text).compactMap { clause in
+            let tokens = contentTokens(in: clause)
+            return tokens.isEmpty ? nil : (clause, tokens)
+        }
+    }
+
+    private func containsMetaAction(in text: String) -> Bool {
+        let patterns = [
+            #"(?i)\bich\s+habe\b"#,
+            #"(?i)\bich\s+hab\b"#,
+            #"(?i)\berledigt\b"#,
+            #"(?i)\bhier\s+ist\b"#,
+            #"(?i)\bschau(?:t|en)?\b"#
+        ]
+        return patterns.contains { pattern in
+            text.range(of: pattern, options: .regularExpression) != nil
+        }
     }
 
     private func isSupported(_ token: String, by supportTokens: [String]) -> Bool {

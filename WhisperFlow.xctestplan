@@ -1,0 +1,78 @@
+{
+  "configurations": [
+    {
+      "id": "A0BA71E1-2E61-45EB-BED7-34B32BB17A42",
+      "name": "Default",
+      "options": {}
+    }
+  ],
+  "defaultOptions": {
+    "testTimeoutsEnabled": true
+  },
+  "testTargets": [
+    {
+      "selectedTests": [
+        "AccessibilityAndInsertionTests/testAXValuePlannerReplacesTheUTF16SelectionAndMovesTheCaret()",
+        "AccessibilityAndInsertionTests/testCancelBeforeCommitPreventsEveryDirectMutation()",
+        "AccessibilityAndInsertionTests/testCancelledSessionCannotInsert()",
+        "AccessibilityAndInsertionTests/testCommitWinningRaceMakesCancellationTruthfullyTooLate()",
+        "AccessibilityAndInsertionTests/testContextIsDefenseInDepthBoundedToFifteenHundredCharacters()",
+        "AccessibilityAndInsertionTests/testContextOffDoesNotReadFocusedElementText()",
+        "AccessibilityAndInsertionTests/testFocusedEditableCandidateRejectsFocusedWebWrappers()",
+        "AccessibilityAndInsertionTests/testFocusedElementFallbackTraversalFindsDeepEditorsAndStopsAtCycles()",
+        "AccessibilityAndInsertionTests/testInserterPrefersConfirmedAXSelectedText()",
+        "AccessibilityAndInsertionTests/testInserterRecapturesTheCurrentTextFieldImmediatelyBeforeCommit()",
+        "AccessibilityAndInsertionTests/testInserterRejectsACommitWithoutACurrentFocusedTextField()",
+        "AccessibilityAndInsertionTests/testInserterRejectsProtectedTextFieldsAtFinalCommit()",
+        "AccessibilityAndInsertionTests/testProductionInsertionUsesNoGeneralPasteboardMutationRoute()",
+        "AccessibilityAndInsertionTests/testProductionRoleAllowlistAcceptsOnlyEditableTextInputs()",
+        "AccessibilityAndInsertionTests/testSensitiveTargetFailsClosedWithoutReadingText()",
+        "AccessibilityAndInsertionTests/testUnconfirmedAXMutationNeverFallsThroughToSecondWrite()",
+        "AccessibilityAndInsertionTests/testUnicodeEventChunksPreserveGraphemesAndReassembleExactly()",
+        "AccessibilityAndInsertionTests/testUnsupportedAXFailsClosedWithoutASecondMutationRoute()",
+        "AccessibilityAndInsertionTests/testValueMutationVerifierAcceptsOnlyOneContiguousReplacement()",
+        "AccessibilityAndInsertionTests/testVisibleChatContextKeepsTheNewestBoundedTailAndFocusedDraft()",
+        "AppCompositionIntegrationTests/testAccessibilityDenialBlocksDirectDictation()",
+        "AppCompositionIntegrationTests/testCleanupFailurePreservesRawTranscriptAndReleasesEverySessionResource()",
+        "AppCompositionIntegrationTests/testCloudOffNeverReachesTransportEvenWhenKeyExists()",
+        "AppCompositionIntegrationTests/testCloudTransportFailureFallsBackWithoutLosingLocalCandidate()",
+        "AppCompositionIntegrationTests/testConfirmedInsertionClearsRawAndCandidateAndRejectsLateWrites()",
+        "AppCompositionIntegrationTests/testLocalPipelineExtractsTermsCorrectsCleanupAndPreservesSafeFallback()",
+        "AppCompositionIntegrationTests/testNormalDictationFlowNeverPresentsAFallbackResultWindow()",
+        "AppCompositionIntegrationTests/testProtectedContentIsCheckedAtCaptureAndRevalidatedBeforeInsertion()",
+        "AudioPlatformTests",
+        "ContextCategoryClassifierTests",
+        "ContextTermExtractorTests",
+        "ContextualTermCorrectorTests",
+        "DeterministicCleanupEngineTests",
+        "DictationCoordinatorTests",
+        "FluidAudioRecognizerTests/testAutomaticGermanAndEnglishModesReachRuntimeWithoutDownloads()",
+        "FluidAudioRecognizerTests/testLocalModelStoreRejectsSameSizeContentCorruption()",
+        "FluidAudioRecognizerTests/testMissingModelFailsClosedBeforeRuntimeAndLeavesAudioOwnedByCaller()",
+        "KeychainAPIKeyStoreTests",
+        "OpenAICloudGateTests",
+        "PCMNormalizerTests",
+        "PersonalLexiconCorrectorTests",
+        "Qwen3ASRRecognizerTests/testProductionRuntimeLoadsOnlyFromValidatedLocalDirectory()",
+        "Qwen3ASRRecognizerTests/testRecognizerUsesValidatedLocalFolderAndMapsLanguages()",
+        "RealtimeCaptureBufferTests",
+        "SettingsStorePrivacyTests/testDiagnosticsArtifactContainsNoMicrophoneIdentifierSurface()",
+        "SettingsStorePrivacyTests/testInitializationScrubsLegacyMicrophoneIdentifier()",
+        "WhisperKitRecognizerTests/testConcurrentPrewarmRequestsAreCoalesced()",
+        "WhisperKitRecognizerTests/testFinalRecognitionRunsOnePromptlessWhisperDecode()",
+        "WhisperKitRecognizerTests/testFinalWhisperDecodeIgnoresPromptTokensAndUsesLowLatencyOptions()",
+        "WhisperKitRecognizerTests/testFinalWhisperDecodeDoesNotDiscardSubsecondUtterances()",
+        "WhisperKitRecognizerTests/testIncrementalSessionAcceptsAudioWithoutModelDecodeBeforeFinalization()",
+        "WhisperKitRecognizerTests/testRecognizerDoesNotPassDecoderPromptTermsToWhisperKit()",
+        "WhisperKitRecognizerTests/testSessionRouterKeepsChoiceStableAndCancelsOriginalBackend()",
+        "WhisperKitRecognizerTests/testSessionRouterLifecycleFallsBackForBatchRecognizersAndFinalizesViaTranscribe()"
+      ],
+      "target": {
+        "containerPath": "container:WhisperFlow.xcodeproj",
+        "identifier": "100000000000000000000402",
+        "name": "WhisperFlowTests"
+      }
+    }
+  ],
+  "version": 1
+}

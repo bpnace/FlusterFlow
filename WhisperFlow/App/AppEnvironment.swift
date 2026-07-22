@@ -59,7 +59,6 @@ final class AppEnvironment {
     let settings: SettingsStore
     let audioSamples: AudioBufferStore
     let permissions: PermissionCenter
-    let microphones: MicrophoneCatalog
     let apiKeySettings: APIKeySettingsModel
     let modelProvisioning: ModelProvisioningViewModel
     let personalLexicon: PersonalLexiconStore
@@ -80,7 +79,6 @@ final class AppEnvironment {
     private lazy var settingsWindow = SettingsWindowController(
         store: settings,
         permissions: permissions,
-        microphones: microphones,
         apiKey: apiKeySettings,
         model: modelProvisioning,
         diagnostics: diagnosticsViewModel,
@@ -114,7 +112,6 @@ final class AppEnvironment {
         let settings = suppliedSettings ?? SettingsStore()
         let samples = AudioBufferStore()
         let permissions = PermissionCenter()
-        let microphones = MicrophoneCatalog()
         let keyStore = KeychainAPIKeyStore()
         let apiKeySettings = APIKeySettingsModel(keyStore: keyStore)
         let personalLexicon = PersonalLexiconStore()
@@ -218,7 +215,6 @@ final class AppEnvironment {
         self.settings = settings
         audioSamples = samples
         self.permissions = permissions
-        self.microphones = microphones
         self.apiKeySettings = apiKeySettings
         self.modelProvisioning = modelProvisioning
         self.personalLexicon = personalLexicon
@@ -342,7 +338,6 @@ final class AppEnvironment {
 
     func refreshSystemStatus() {
         permissions.refresh()
-        microphones.refresh()
         modelProvisioning.refresh()
     }
 
@@ -502,7 +497,12 @@ final class AppEnvironment {
                                 availability: .unavailable,
                                 boundedText: nil,
                                 protectedTerms: prioritizedTerms
-                            )
+                            ),
+                            promptPrefix: """
+                            Sprache: Deutsch
+                            Policy: contextSupportedReconstruction
+                            Lokaler Kandidat:
+                            """
                         )
                     )
                     _ = await (prepareASR, prepareRewrite)

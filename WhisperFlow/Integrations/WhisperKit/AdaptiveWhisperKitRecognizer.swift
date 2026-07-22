@@ -32,7 +32,7 @@ struct AdaptiveWhisperKitPolicy: Sendable {
            compressionRatio > highCompressionRatioThreshold {
             reasons.append(.highCompressionRatio(compressionRatio))
         }
-        if transcript.decoderFallback?.occurred == true {
+        if isActionableDecoderFallback(transcript.decoderFallback) {
             reasons.append(.decoderFallback(transcript.decoderFallback?.reasons ?? []))
         }
         if !unresolvedTerms.isEmpty {
@@ -178,7 +178,7 @@ struct AdaptiveWhisperKitPolicy: Sendable {
                 score -= 1
             }
         }
-        if transcript.decoderFallback?.occurred == true {
+        if isActionableDecoderFallback(transcript.decoderFallback) {
             score -= 2
         }
         score += matchedLexiconTermCount(in: transcript.text, hints: hints) * 2
@@ -226,6 +226,16 @@ struct AdaptiveWhisperKitPolicy: Sendable {
         }
         let uniqueRatio = Float(Set(words).count) / Float(words.count)
         return uniqueRatio < 0.45
+    }
+
+    private func isActionableDecoderFallback(
+        _ decoderFallback: RecognitionDecoderFallback?
+    ) -> Bool {
+        guard decoderFallback?.occurred == true else { return false }
+        let reasons = decoderFallback?.reasons ?? []
+        guard !reasons.isEmpty else { return true }
+        let recoveryOnlyReasons: Set<String> = ["noSpeechRecovery", "promptlessRecovery"]
+        return reasons.contains { !recoveryOnlyReasons.contains($0) }
     }
 
     private func hasImmediateRepeatedPhrase(_ words: [String]) -> Bool {

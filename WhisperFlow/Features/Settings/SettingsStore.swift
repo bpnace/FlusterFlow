@@ -267,9 +267,6 @@ final class SettingsStore: ObservableObject {
     @Published private(set) var isShortcutCaptureActive = false
     @Published private(set) var pushToTalkRegistrationStatus: PushToTalkRegistrationStatus = .initializing
 
-    /// Process-local only. Device identifiers must never cross a persistence boundary.
-    @Published var selectedMicrophoneUID: String?
-
     @Published var localModel: LocalModelChoice {
         didSet {
             defaults.set(localModel.rawValue, forKey: Key.localModel)
@@ -318,7 +315,6 @@ final class SettingsStore: ObservableObject {
             pushToTalkEnabled = defaults.bool(forKey: Key.pushToTalkEnabled)
         }
         shortcut = Self.loadShortcut(from: defaults)
-        selectedMicrophoneUID = nil
         localModel = LocalModelChoice(
             rawValue: defaults.string(forKey: Key.localModel) ?? ""
         ) ?? .adaptive

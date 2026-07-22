@@ -57,15 +57,19 @@ Den Cursor in ein editierbares Textfeld setzen, das ausgewählte Kürzel gedrüc
 
 ## Bauen und testen
 
+Der normale Testlauf ist auf höchstens 150 produktnahe Tests begrenzt. Der
+vollständige Bestand bleibt als expliziter Extended-Lauf erhalten.
+
 ```bash
 xcodebuild -project WhisperFlow.xcodeproj -scheme WhisperFlow \
   -configuration Debug -destination 'platform=macOS,arch=arm64' \
   CODE_SIGNING_ALLOWED=NO build
 
-xcodebuild -project WhisperFlow.xcodeproj -scheme WhisperFlow \
-  -configuration Debug -destination 'platform=macOS,arch=arm64' \
-  CODE_SIGNING_ALLOWED=NO test
+bash Scripts/run-capped-tests.sh
+bash Scripts/run-capped-tests.sh --verify-only
 
+# Extended/Release, nicht der normale lokale Lauf:
+bash Scripts/run-capped-tests.sh --full
 swift build
 swift test
 bash Scripts/verify-local-network.sh

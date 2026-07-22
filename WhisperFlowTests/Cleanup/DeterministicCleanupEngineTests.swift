@@ -87,11 +87,26 @@ final class DeterministicCleanupEngineTests: XCTestCase {
             "also, wir starten",
             language: .german
         )
+        let subordinateSafe = DeterministicCleanupEngine().clean(
+            "Also wenn wir das nochmal testen, kannst du auch gleich gucken, ob die Formatierung stimmt.",
+            language: .german
+        )
+        let ordinaryAlso = DeterministicCleanupEngine().clean(
+            "Also gehen wir jetzt.",
+            language: .german
+        )
 
         XCTAssertEqual(unsafe.text, "Das ist quasi fertig.")
         XCTAssertFalse(unsafe.appliedRules.contains("filler.remove.safe"))
         XCTAssertEqual(safe.text, "Wir starten.")
         XCTAssertTrue(safe.appliedRules.contains("filler.remove.safe"))
+        XCTAssertEqual(
+            subordinateSafe.text,
+            "Wenn wir das noch einmal testen, kannst du auch gleich gucken, ob die Formatierung stimmt."
+        )
+        XCTAssertTrue(subordinateSafe.appliedRules.contains("filler.remove.safe"))
+        XCTAssertEqual(ordinaryAlso.text, "Also gehen wir jetzt.")
+        XCTAssertFalse(ordinaryAlso.appliedRules.contains("filler.remove.safe"))
     }
 
     func testExplicitCorrectionMarkerVariantsCrossLineSegments() {
@@ -132,13 +147,23 @@ final class DeterministicCleanupEngineTests: XCTestCase {
     }
 
     func testCollapsesDirectRepeatedMultiWordFalseStart() {
-        let result = DeterministicCleanupEngine().clean(
+        let engine = DeterministicCleanupEngine()
+        let result = engine.clean(
             "normal und wenn wir wenn wir es normal testen",
+            language: .german
+        )
+        let loop = engine.clean(
+            "OK, testen wir noch einmal, ob es funktioniert. Versuch mal, jetzt diesen Text einzusetzen und dann gucken wir, ob alles klappt wie es soll. Ich habe das jetzt. schon ein. Ich habe das jetzt. Und dann habe ich den Text einzusetzen. Also das jetzt. Ich habe das jetzt. Ich habe das. Und dann hat das, wie ich mir mal. Schaut. Schaut.",
             language: .german
         )
 
         XCTAssertEqual(result.text, "Normal und wenn wir es normal testen.")
         XCTAssertTrue(result.appliedRules.contains("repetition.collapse.exact"))
+        XCTAssertEqual(
+            loop.text,
+            "OK, testen wir noch einmal, ob es funktioniert. Versuch mal, jetzt diesen Text einzusetzen und dann gucken wir, ob alles klappt wie es soll."
+        )
+        XCTAssertTrue(loop.appliedRules.contains("repetition.truncate.loop"))
     }
 
     func testCollapsesSafeBacktrackingWithoutDroppingFillers() {
@@ -162,15 +187,36 @@ final class DeterministicCleanupEngineTests: XCTestCase {
             "öffne https://example.com https://example.com",
             language: .german
         )
+        let identifier = engine.clean(
+            "prüfe contextTerm contextTerm contextTerm bleibt sichtbar",
+            language: .german
+        )
+        let quote = engine.clean(
+            "notiere \"ich habe das jetzt\" \"ich habe das jetzt\" \"ich habe das jetzt\"",
+            language: .german
+        )
 
         XCTAssertEqual(number.text, "Wir brauchen 17 Module 17 Module.")
         XCTAssertFalse(number.appliedRules.contains("repetition.collapse.exact"))
+        XCTAssertFalse(number.appliedRules.contains("repetition.truncate.loop"))
         XCTAssertEqual(name.text, "Lena Fischer Lena Fischer bleibt sichtbar.")
         XCTAssertFalse(name.appliedRules.contains("repetition.collapse.exact"))
+        XCTAssertFalse(name.appliedRules.contains("repetition.truncate.loop"))
         XCTAssertEqual(negation.text, "Bitte nicht nur nicht nur lokal.")
         XCTAssertFalse(negation.appliedRules.contains("repetition.collapse.exact"))
+        XCTAssertFalse(negation.appliedRules.contains("repetition.truncate.loop"))
         XCTAssertEqual(url.text, "Öffne https://example.com https://example.com.")
         XCTAssertFalse(url.appliedRules.contains("repetition.collapse.exact"))
+        XCTAssertFalse(url.appliedRules.contains("repetition.truncate.loop"))
+        XCTAssertEqual(identifier.text, "Prüfe contextTerm contextTerm contextTerm bleibt sichtbar.")
+        XCTAssertFalse(identifier.appliedRules.contains("repetition.collapse.exact"))
+        XCTAssertFalse(identifier.appliedRules.contains("repetition.truncate.loop"))
+        XCTAssertEqual(
+            quote.text,
+            "Notiere \"ich habe das jetzt\" \"ich habe das jetzt\" \"ich habe das jetzt\"."
+        )
+        XCTAssertFalse(quote.appliedRules.contains("repetition.collapse.exact"))
+        XCTAssertFalse(quote.appliedRules.contains("repetition.truncate.loop"))
     }
 
     func testFixtureTargetKindsMapWithoutCollapsingChatOrUnknown() throws {

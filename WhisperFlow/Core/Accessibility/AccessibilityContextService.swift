@@ -88,6 +88,11 @@ actor AccessibilityContextService: TargetContextProviding {
     }
 
     func capture(for sessionID: DictationSessionID) async throws -> CapturedTargetContext {
+        let captured = try await captureTarget(for: sessionID)
+        return try await enrichContext(for: captured, sessionID: sessionID)
+    }
+
+    func captureTarget(for sessionID: DictationSessionID) async throws -> CapturedTargetContext {
         let capture = await registry.captureTarget(for: sessionID)
         switch capture {
         case .unavailable(let processIdentifier):
@@ -113,44 +118,45 @@ actor AccessibilityContextService: TargetContextProviding {
                     )
                 )
             }
-
-            guard await contextEnabled() else {
-                return CapturedTargetContext(
-                    target: captured.snapshot,
-                    context: .unavailable(
-                        targetKind: captured.targetKind,
-                        localCategory: captured.localCategory,
-                        safeDecoderHints: captured.safeDecoderHints
-                    )
-                )
-            }
-
-            guard let text = await registry.boundedContext(
-                for: captured.snapshot,
-                maximumCharacters: Self.maximumContextCharacters
-            ) else {
-                return CapturedTargetContext(
-                    target: captured.snapshot,
-                    context: .unavailable(
-                        targetKind: captured.targetKind,
-                        localCategory: captured.localCategory,
-                        safeDecoderHints: captured.safeDecoderHints
-                    )
-                )
-            }
-
             return CapturedTargetContext(
                 target: captured.snapshot,
-                context: ContextSnapshot(
-                    availability: .available,
+                context: .unavailable(
                     targetKind: captured.targetKind,
-                    boundedText: String(text.prefix(Self.maximumContextCharacters)),
-                    termHints: [],
                     localCategory: captured.localCategory,
                     safeDecoderHints: captured.safeDecoderHints
                 )
             )
         }
+    }
+
+    func enrichContext(
+        for captured: CapturedTargetContext,
+        sessionID _: DictationSessionID
+    ) async throws -> CapturedTargetContext {
+        guard captured.target.isRegistered,
+              captured.context.availability != .deniedSensitive,
+              await contextEnabled() else {
+            return captured
+        }
+
+        guard let text = await registry.boundedContext(
+            for: captured.target,
+            maximumCharacters: Self.maximumContextCharacters
+        ) else {
+            return captured
+        }
+
+        return CapturedTargetContext(
+            target: captured.target,
+            context: ContextSnapshot(
+                availability: .available,
+                targetKind: captured.context.targetKind,
+                boundedText: String(text.prefix(Self.maximumContextCharacters)),
+                termHints: [],
+                localCategory: captured.context.localCategory,
+                safeDecoderHints: captured.context.safeDecoderHints
+            )
+        )
     }
 
     func cancel(sessionID: DictationSessionID) async {

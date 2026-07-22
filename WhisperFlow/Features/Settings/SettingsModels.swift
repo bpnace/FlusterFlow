@@ -210,28 +210,6 @@ private extension PermissionState {
     }
 }
 
-struct MicrophoneOption: Identifiable, Equatable, Sendable {
-    /// Volatile CoreAudio UID, retained only for the current process.
-    let id: String
-    let name: String
-}
-
-@MainActor
-final class MicrophoneCatalog: ObservableObject {
-    @Published private(set) var devices: [MicrophoneOption] = []
-
-    init() {
-        refresh()
-    }
-
-    func refresh() {
-        devices = CoreAudioInputDevices.available()
-            .filter(\.isAlive)
-            .map { MicrophoneOption(id: $0.uid, name: $0.name) }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-    }
-}
-
 enum APIKeySettingsState: Equatable, Sendable {
     case checking
     case missing

@@ -28,6 +28,7 @@ struct LocalRewriteModelResponse: Equatable, Sendable {
 }
 
 struct LocalRewriteModelPrewarmRequest: Equatable, Sendable {
+    let sessionID: DictationSessionID
     let language: TextRewriteLanguage
     let context: TextRewriteContext
     let promptPrefix: String

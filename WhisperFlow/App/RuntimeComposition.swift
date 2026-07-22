@@ -44,7 +44,22 @@ struct ExtractingTargetContextProvider: TargetContextProviding {
     }
 
     func capture(for sessionID: DictationSessionID) async throws -> CapturedTargetContext {
-        let captured = try await provider.capture(for: sessionID)
+        let target = try await captureTarget(for: sessionID)
+        return try await enrichContext(for: target, sessionID: sessionID)
+    }
+
+    func captureTarget(for sessionID: DictationSessionID) async throws -> CapturedTargetContext {
+        try await provider.captureTarget(for: sessionID)
+    }
+
+    func enrichContext(
+        for capturedTarget: CapturedTargetContext,
+        sessionID: DictationSessionID
+    ) async throws -> CapturedTargetContext {
+        let captured = try await provider.enrichContext(
+            for: capturedTarget,
+            sessionID: sessionID
+        )
         guard captured.context.availability == .available,
               let boundedText = captured.context.boundedText else {
             return captured
@@ -825,12 +840,7 @@ struct DictationComposition {
         let coordinator = DictationCoordinator(
             contextProvider: context,
             audioCapture: TimedAudioCapture(
-                capture: AVAudioEngineCapture(
-                    store: audioSamples,
-                    selectedInputUID: { @MainActor [weak settings] in
-                        settings?.selectedMicrophoneUID
-                    }
-                ),
+                capture: AVAudioEngineCapture(store: audioSamples),
                 diagnostics: diagnostics,
                 sessionDiagnostics: sessionDiagnostics
             ),

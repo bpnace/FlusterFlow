@@ -37,7 +37,7 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(snapshot.promptTokens, [])
     }
 
-    func testRecognizerBuildsPrioritizedPromptWithinTokenBudget() async throws {
+    func testRecognizerDoesNotPassDecoderPromptTermsToWhisperKit() async throws {
         let samples = AudioBufferStore()
         let input = await samples.store(AudioSamples(values: [0.1, -0.1]))
         let runtime = RecordingWhisperKitRuntime(result: "AmberMesh")
@@ -58,7 +58,21 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         )
 
         let snapshot = await runtime.snapshot()
-        XCTAssertEqual(snapshot.promptTokens, [9, 9])
+        XCTAssertEqual(snapshot.promptTokens, [])
+        XCTAssertEqual(snapshot.transcriptionCount, 1)
+
+        let encodedTerms: [String: [Int]] = [
+            " AmberMesh": [10, 50_257],
+            " two token": [20, 21]
+        ]
+        let promptTokens = ["AmberMesh", "two token"].flatMap { term in
+            OfflineWhisperKitRuntime.promptTokens(
+                for: term,
+                specialTokenBegin: 50_257,
+                encodedBy: { encodedTerms[$0] ?? [] }
+            )
+        }
+        XCTAssertEqual(promptTokens, [10, 20, 21])
     }
 
     func testRecognizerPreservesExplicitWhisperKitBackendLabel() async throws {
@@ -81,7 +95,7 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(transcript.backend, .whisperKitLargeV3)
     }
 
-    func testIncrementalSessionDecodesARecordingPrefixBeforeFinalization() async throws {
+    func testIncrementalSessionAcceptsAudioWithoutModelDecodeBeforeFinalization() async throws {
         let runtime = RecordingWhisperKitRuntime(result: "prefix")
         let recognizer = WhisperKitRecognizer(
             sampleAccess: AudioBufferStore(),
@@ -105,9 +119,9 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
 
         XCTAssertEqual(disposition, .accepted)
         let snapshot = await runtime.snapshot()
-        XCTAssertEqual(snapshot.transcriptionCount, 1)
-        XCTAssertEqual(snapshot.language, .german)
-        XCTAssertEqual(snapshot.promptTokens, [11])
+        XCTAssertEqual(snapshot.transcriptionCount, 0)
+        XCTAssertEqual(snapshot.language, nil)
+        XCTAssertEqual(snapshot.promptTokens, [])
         await recognizer.stopRecognitionSession(sessionID: sessionID)
     }
 
@@ -122,20 +136,62 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
             0,
             "Final PTT audio is already complete; clipping WhisperKit's default final second makes valid short utterances decode as empty."
         )
+        XCTAssertEqual(options.temperatureFallbackCount, 0)
+        XCTAssertEqual(options.sampleLength, 128)
+        XCTAssertTrue(options.withoutTimestamps)
+        XCTAssertFalse(options.wordTimestamps)
+        XCTAssertNil(options.firstTokenLogProbThreshold)
+        XCTAssertNil(options.noSpeechThreshold)
+        XCTAssertEqual(options.promptTokens, [])
     }
 
-    func testEmptyTranscriptionRecoveryDisablesNoSpeechGateAndTimestampComplexity() {
+    func testFinalWhisperDecodeIgnoresPromptTokensAndUsesLowLatencyOptions() {
         let options = OfflineWhisperKitRuntime.decodingOptions(
             language: .german,
-            promptTokens: [1, 2, 3],
-            recoveringFromEmptyTranscription: true
+            promptTokens: [1, 2, 3]
         )
 
         XCTAssertNil(options.noSpeechThreshold)
+        XCTAssertNil(options.firstTokenLogProbThreshold)
         XCTAssertTrue(options.withoutTimestamps)
         XCTAssertFalse(options.wordTimestamps)
         XCTAssertEqual(options.windowClipTime, 0)
-        XCTAssertEqual(options.promptTokens, [1, 2, 3])
+        XCTAssertEqual(options.temperatureFallbackCount, 0)
+        XCTAssertEqual(options.sampleLength, 128)
+        XCTAssertEqual(options.promptTokens, [])
+    }
+
+    func testFinalRecognitionRunsOnePromptlessWhisperDecode() async throws {
+        let samples = AudioBufferStore()
+        let input = await samples.store(AudioSamples(values: [0.1, -0.1]))
+        let runtime = PromptSensitiveWhisperKitRuntime(promptlessResult: "Hallo Welt")
+        let recognizer = WhisperKitRecognizer(
+            sampleAccess: samples,
+            modelStore: ReadyLocalModelChecker(directory: URL(fileURLWithPath: "/private/model")),
+            tokenizerStore: ReadyLocalModelChecker(directory: URL(fileURLWithPath: "/private/tokenizer")),
+            runtime: runtime
+        )
+
+        let transcript: RawTranscript
+        do {
+            transcript = try await recognizer.transcribe(
+                input,
+                hints: RecognitionHints(
+                    language: .german,
+                    terms: ["Kontextbegriff"],
+                    prioritizedLexiconTerms: ["FlusterFlow"]
+                ),
+                sessionID: DictationSessionID(rawValue: 31)
+            )
+        } catch {
+            XCTFail("Prompt history before failure: \(await runtime.promptHistory())")
+            throw error
+        }
+
+        XCTAssertEqual(transcript.text, "Hallo Welt")
+        XCTAssertEqual(transcript.decoderFallback, RecognitionDecoderFallback.none)
+        let promptHistory = await runtime.promptHistory()
+        XCTAssertEqual(promptHistory, [[]])
     }
 
     func testWhisperFailureClassificationNeverNeedsUserContent() {
@@ -147,6 +203,7 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
             WhisperKitRecognizer.failureCode(for: WhisperKitRecognizerError.emptyTranscription),
             .emptyTranscription
         )
+        XCTAssertFalse(WhisperKitRecognizerError.emptyTranscription.indicatesNoSpeech)
     }
 
     func testConcurrentPrewarmRequestsAreCoalesced() async throws {
@@ -245,6 +302,29 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(reasons.contains(.highCompressionRatio(2.3)))
         XCTAssertTrue(reasons.contains(.decoderFallback(["temperatureFallback"])))
         XCTAssertTrue(reasons.contains(.unresolvedPrioritizedLexicon(["AmberMesh"])))
+
+        let recoveryOnly = RawTranscript(
+            text: "hello AmberMesh",
+            language: .english,
+            avgLogprob: -0.1,
+            minWordProbability: 0.95,
+            compressionRatio: 1.0,
+            decoderFallback: RecognitionDecoderFallback(
+                occurred: true,
+                count: 2,
+                reasons: ["noSpeechRecovery", "promptlessRecovery"]
+            )
+        )
+        XCTAssertTrue(
+            policy.fallbackReasons(
+                for: recoveryOnly,
+                hints: RecognitionHints(
+                    language: .english,
+                    terms: [],
+                    prioritizedLexiconTerms: ["AmberMesh"]
+                )
+            ).isEmpty
+        )
     }
 
     func testAdaptivePolicyFallbacksForSuspiciousSentenceStructureEvenWithHighConfidence() {
@@ -678,9 +758,13 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
                 mono[frame] += channelData[channel][frame] / Float(channelCount)
             }
         }
-        return try PCMNormalizer.normalize([
-            CapturedAudioChunk(monoSamples: mono, sampleRate: format.sampleRate)
-        ])
+        let realtimeChunks = stride(from: 0, to: mono.count, by: 512).map { start in
+            CapturedAudioChunk(
+                monoSamples: Array(mono[start..<min(start + 512, mono.count)]),
+                sampleRate: format.sampleRate
+            )
+        }
+        return try PCMNormalizer.normalize(realtimeChunks)
     }
 }
 
@@ -775,6 +859,75 @@ private actor RecordingWhisperKitRuntime: WhisperKitRuntimeServing {
             transcriptionCount: transcriptionCount,
             prewarmCount: prewarmCount
         )
+    }
+}
+
+private actor PromptSensitiveWhisperKitRuntime: WhisperKitRuntimeServing {
+    private let promptlessResult: String
+    private var prompts: [[Int]] = []
+
+    init(promptlessResult: String) {
+        self.promptlessResult = promptlessResult
+    }
+
+    func prepare(modelDirectory: URL, tokenizerDirectory: URL) {
+        _ = modelDirectory
+        _ = tokenizerDirectory
+    }
+
+    func prewarm(modelDirectory: URL, tokenizerDirectory: URL) {
+        prepare(modelDirectory: modelDirectory, tokenizerDirectory: tokenizerDirectory)
+    }
+
+    func unload() {}
+
+    func prioritizedPromptTokens(for terms: [String], maxTokens: Int) -> [Int] {
+        var tokens: [Int] = []
+        for term in terms {
+            let count = term.count
+            guard tokens.count + count <= maxTokens else { continue }
+            tokens.append(count)
+        }
+        return tokens
+    }
+
+    func transcribe(
+        samples: [Float],
+        language: WhisperKitLanguageMode,
+        promptTokens: [Int],
+        sessionID: DictationSessionID
+    ) -> WhisperKitRecognitionResult {
+        _ = samples
+        _ = language
+        _ = sessionID
+        prompts.append(promptTokens)
+        let text = promptTokens.isEmpty ? promptlessResult : ""
+        return WhisperKitRecognitionResult(
+            text: text,
+            segments: text.isEmpty ? [] : [
+                RecognitionSegmentMetadata(
+                    text: text,
+                    avgLogprob: -0.1,
+                    compressionRatio: 1.0,
+                    noSpeechProbability: 0,
+                    wordProbabilities: [
+                        RecognitionWordProbability(word: text, probability: 0.95)
+                    ]
+                )
+            ],
+            avgLogprob: text.isEmpty ? nil : -0.1,
+            minWordProbability: text.isEmpty ? nil : 0.95,
+            compressionRatio: text.isEmpty ? nil : 1.0,
+            decoderFallback: .none
+        )
+    }
+
+    func cancel(sessionID: DictationSessionID) {
+        _ = sessionID
+    }
+
+    func promptHistory() -> [[Int]] {
+        prompts
     }
 }
 

@@ -45,6 +45,7 @@ struct DeterministicCleanupEngine: TextCleaning {
         recordAmbiguousInitialFiller(in: text, language: resolvedLanguage, rules: &rules)
         text = removeSafeFillers(text, language: resolvedLanguage, rules: &rules)
         text = collapseExactRepeatedPhrases(text, language: resolvedLanguage, rules: &rules)
+        text = truncateRepetitiveLoopSuffix(text, language: resolvedLanguage, rules: &rules)
         text = applyExplicitCorrection(text, language: resolvedLanguage, rules: &rules)
 
         if let list = spokenList(text, language: resolvedLanguage) {
@@ -97,6 +98,7 @@ struct DeterministicCleanupEngine: TextCleaning {
             "filler.remove.safe",
             "filler.keep.ambiguous",
             "repetition.collapse.exact",
+            "repetition.truncate.loop",
             "correction.explicit",
             "list.spoken.numbered",
             "list.spoken.bulleted",
@@ -422,7 +424,7 @@ struct DeterministicCleanupEngine: TextCleaning {
         _ text: String,
         rules: inout [String]
     ) -> String {
-        let pattern = #"(?i)(?<![\p{L}\p{N}_])(?:also|halt|quasi|eigentlich),\s+"#
+        let pattern = #"(?i)(?<![\p{L}\p{N}_])(?:also|halt|quasi|eigentlich),\s+|^\s*also\s+(?=wenn\b|falls\b|ob\b)"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             preconditionFailure("Invalid internal cleanup regular expression")
         }
@@ -500,6 +502,100 @@ struct DeterministicCleanupEngine: TextCleaning {
         return nil
     }
 
+    private func truncateRepetitiveLoopSuffix(
+        _ text: String,
+        language: DictationLanguage,
+        rules: inout [String]
+    ) -> String {
+        guard let start = repetitiveLoopSuffixStart(in: text, language: language) else {
+            return text
+        }
+        rules.append("repetition.truncate.loop")
+        return String(text[..<start]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func repetitiveLoopSuffixStart(
+        in text: String,
+        language: DictationLanguage
+    ) -> String.Index? {
+        let tokens = cleanupTokens(in: text)
+        guard tokens.count >= 9 else { return nil }
+
+        for index in tokens.indices {
+            let remaining = tokens.count - index
+            guard remaining >= 9 else { break }
+            let prefix = text[..<tokens[index].range.lowerBound]
+            guard prefix.contains(".") || prefix.split(whereSeparator: \.isWhitespace).count >= 12 else {
+                continue
+            }
+
+            let maxLength = min(6, remaining / 3)
+            for length in stride(from: maxLength, through: 3, by: -1) {
+                let phrase = tokens[index..<(index + length)]
+                guard !containsProtectedContent(in: phrase, language: language),
+                      !containsProtectedSyntax(in: phrase, source: text) else {
+                    continue
+                }
+                let occurrenceStarts = nonOverlappingOccurrenceStarts(
+                    of: phrase,
+                    in: tokens,
+                    startingAt: index
+                )
+                guard occurrenceStarts.count >= 3,
+                      isInformationPoorLoopSuffix(
+                        tokens[index...],
+                        repeatedTokenCount: occurrenceStarts.count * length,
+                        source: text,
+                        language: language
+                      ) else {
+                    continue
+                }
+                return tokens[index].range.lowerBound
+            }
+        }
+        return nil
+    }
+
+    private func nonOverlappingOccurrenceStarts(
+        of phrase: ArraySlice<CleanupToken>,
+        in tokens: [CleanupToken],
+        startingAt startIndex: Int
+    ) -> [Int] {
+        let normalizedPhrase = phrase.map(\.normalized)
+        let length = normalizedPhrase.count
+        var starts: [Int] = []
+        var index = startIndex
+        while index + length <= tokens.count {
+            let candidate = tokens[index..<(index + length)].map(\.normalized)
+            if candidate == normalizedPhrase {
+                starts.append(index)
+                index += length
+            } else {
+                index += 1
+            }
+        }
+        return starts
+    }
+
+    private func isInformationPoorLoopSuffix(
+        _ tokens: ArraySlice<CleanupToken>,
+        repeatedTokenCount: Int,
+        source: String,
+        language: DictationLanguage
+    ) -> Bool {
+        guard let first = tokens.first, let last = tokens.last else { return false }
+        guard !containsProtectedLoopSuffixContent(in: tokens, language: language),
+              !containsHardProtectedSyntax(in: first.range.lowerBound..<last.range.upperBound, source: source) else {
+            return false
+        }
+
+        let tokenCount = tokens.count
+        let uniqueCount = Set(tokens.map(\.normalized)).count
+        let uniqueRatio = Double(uniqueCount) / Double(tokenCount)
+        let repeatedRatio = Double(repeatedTokenCount) / Double(tokenCount)
+        return uniqueRatio <= 0.72 && repeatedRatio >= 0.25
+    }
+
     private func cleanupTokens(in text: String) -> [CleanupToken] {
         let pattern = #"(?<![\p{L}\p{N}_])[\p{L}\p{N}][\p{L}\p{N}'_-]*(?![\p{L}\p{N}_])"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
@@ -527,11 +623,32 @@ struct DeterministicCleanupEngine: TextCleaning {
         return containsProperName(tokens)
     }
 
+    private func containsProtectedLoopSuffixContent(
+        in tokens: ArraySlice<CleanupToken>,
+        language: DictationLanguage
+    ) -> Bool {
+        if tokens.contains(where: { token in
+            token.text.contains(where: \.isNumber)
+                || isNegation(token.normalized, language: language)
+                || isIdentifierLike(token.text)
+        }) {
+            return true
+        }
+        return containsDistinctProperName(tokens)
+    }
+
     private func containsProtectedSyntax(
         in tokens: ArraySlice<CleanupToken>,
         source: String
     ) -> Bool {
         guard let first = tokens.first, let last = tokens.last else { return false }
+        if hasQuoteBoundary(
+            before: first.range.lowerBound,
+            after: last.range.upperBound,
+            in: source
+        ) {
+            return true
+        }
         let phrase = source[first.range.lowerBound..<last.range.upperBound]
         return phrase.contains(where: { character in
             character == ":" || character == "/" || character == "\\"
@@ -539,6 +656,66 @@ struct DeterministicCleanupEngine: TextCleaning {
                 || character == "\"" || character == "„" || character == "“"
                 || character == "”"
         })
+    }
+
+    private func containsHardProtectedSyntax(
+        in range: Range<String.Index>,
+        source: String
+    ) -> Bool {
+        let suffix = source[range]
+        return suffix.contains(where: { character in
+            character == ":" || character == "/" || character == "\\"
+                || character == "@" || character == "#"
+                || character == "\"" || character == "„" || character == "“"
+                || character == "”"
+        })
+    }
+
+    private func hasQuoteBoundary(
+        before lowerBound: String.Index,
+        after upperBound: String.Index,
+        in source: String
+    ) -> Bool {
+        guard let previous = previousNonWhitespace(before: lowerBound, in: source),
+              let next = nextNonWhitespace(after: upperBound, in: source) else {
+            return false
+        }
+        return isOpeningQuote(previous) && isClosingQuote(next)
+    }
+
+    private func previousNonWhitespace(
+        before position: String.Index,
+        in source: String
+    ) -> Character? {
+        guard position > source.startIndex else { return nil }
+        var index = source.index(before: position)
+        while true {
+            let character = source[index]
+            if !character.isWhitespace { return character }
+            guard index > source.startIndex else { return nil }
+            index = source.index(before: index)
+        }
+    }
+
+    private func nextNonWhitespace(
+        after position: String.Index,
+        in source: String
+    ) -> Character? {
+        var index = position
+        while index < source.endIndex {
+            let character = source[index]
+            if !character.isWhitespace { return character }
+            index = source.index(after: index)
+        }
+        return nil
+    }
+
+    private func isOpeningQuote(_ character: Character) -> Bool {
+        character == "\"" || character == "'" || character == "„" || character == "“"
+    }
+
+    private func isClosingQuote(_ character: Character) -> Bool {
+        character == "\"" || character == "'" || character == "“" || character == "”"
     }
 
     private func isNegation(_ token: String, language: DictationLanguage) -> Bool {
@@ -558,6 +735,22 @@ struct DeterministicCleanupEngine: TextCleaning {
                 if capitalizedRun >= 2 { return true }
             } else {
                 capitalizedRun = 0
+            }
+        }
+        return false
+    }
+
+    private func containsDistinctProperName(_ tokens: ArraySlice<CleanupToken>) -> Bool {
+        var previousCapitalized: CleanupToken?
+        for token in tokens {
+            if token.text.first?.isUppercase == true {
+                if let previousCapitalized,
+                   previousCapitalized.normalized != token.normalized {
+                    return true
+                }
+                previousCapitalized = token
+            } else {
+                previousCapitalized = nil
             }
         }
         return false
@@ -774,6 +967,7 @@ struct DeterministicCleanupEngine: TextCleaning {
         var text = original
         let phrases: [(source: String, target: String, rule: String)] = language == .german
             ? [
+                ("nochmal", "noch einmal", "orthography.de"),
                 ("ende-zu-ende test", "Ende-zu-Ende-Test", "hyphen.compound"),
                 ("datenschutz einstellung", "Datenschutzeinstellung", "compound.safe"),
                 ("de en", "DE/EN", "language.pair")

@@ -46,6 +46,69 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(audioStartCount, 0)
     }
 
+    func testAudioWaitsForInitialTargetCaptureBeforeRecording() async {
+        let captureStarted = AsyncGate()
+        let releaseCapture = AsyncGate()
+        let context = GatedContextProvider(started: captureStarted, release: releaseCapture)
+        let audio = CountingAudioCapture()
+        let coordinator = makeCoordinator(
+            contextProvider: context,
+            audioCapture: audio
+        )
+
+        let startTask = Task { await coordinator.start(language: .german) }
+        await captureStarted.wait()
+        let audioStartCount = await audio.startCount()
+        let primingSnapshot = await coordinator.snapshot()
+
+        XCTAssertEqual(audioStartCount, 0)
+        XCTAssertEqual(primingSnapshot.phase, .priming)
+        XCTAssertNotNil(primingSnapshot.activeSessionID)
+
+        await releaseCapture.open()
+        let sessionID = startedSessionID(await startTask.value)
+        let listeningSnapshot = await coordinator.snapshot()
+        let finalAudioStartCount = await audio.startCount()
+
+        XCTAssertEqual(
+            listeningSnapshot,
+            DictationSnapshot(phase: .listening, activeSessionID: sessionID)
+        )
+        XCTAssertEqual(finalAudioStartCount, 1)
+        _ = await coordinator.cancel(sessionID: sessionID)
+    }
+
+    func testAudioStartsBeforeSlowContextEnrichmentAndQuickDictationStillCompletes() async {
+        let enrichmentStarted = AsyncGate()
+        let releaseEnrichment = AsyncGate()
+        let context = SplitGatedContextProvider(
+            enrichmentStarted: enrichmentStarted,
+            releaseEnrichment: releaseEnrichment
+        )
+        let audio = CountingAudioCapture()
+        let coordinator = makeCoordinator(
+            contextProvider: context,
+            audioCapture: audio
+        )
+
+        let sessionID = startedSessionID(await coordinator.start(language: .german))
+        await enrichmentStarted.wait()
+        let startCount = await audio.startCount()
+        let snapshot = await coordinator.snapshot()
+
+        XCTAssertEqual(startCount, 1)
+        XCTAssertEqual(
+            snapshot,
+            DictationSnapshot(phase: .listening, activeSessionID: sessionID)
+        )
+
+        let stopTask = Task { await coordinator.stop(sessionID: sessionID) }
+        await releaseEnrichment.open()
+        let outcome = await stopTask.value
+
+        XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect))
+    }
+
     func testLocalPipelineCompletesWithConfirmedInsertion() async {
         let insertion = RecordingInsertion()
         let coordinator = makeCoordinator(insertion: insertion)
@@ -90,6 +153,30 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(events, ["start", "update", "stop", "finalize", "cancel"])
     }
 
+    func testFastSpeechReleaseFinalDecodesWhenStreamingHasNoAudioYet() async {
+        let audio = StreamingAudioCapture()
+        let recognizer = FastReleaseLifecycleRecognizer()
+        let insertion = RecordingInsertion()
+        let coordinator = makeCoordinator(
+            audioCapture: audio,
+            recognizer: recognizer,
+            insertion: insertion
+        )
+        let sessionID = startedSessionID(await coordinator.start(language: .german))
+
+        await coordinator.beginIncrementalRecognition(sessionID: sessionID)
+        let outcome = await coordinator.stop(sessionID: sessionID)
+        let events = await recognizer.recordedEvents()
+        let candidates = await insertion.candidates()
+
+        XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect))
+        XCTAssertTrue(events.contains("stop"))
+        XCTAssertTrue(events.contains("transcribe"))
+        XCTAssertFalse(events.contains("update"))
+        XCTAssertFalse(events.contains("finalize"))
+        XCTAssertEqual(candidates, [.local(LocalCandidate(text: "schneller test"))])
+    }
+
     func testSilentCaptureStopsBeforeASROrInsertion() async {
         let audio = SilentAudioCapture()
         let recognizer = CountingBorrowingRecognizer()
@@ -115,6 +202,26 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
             snapshot,
             DictationSnapshot(phase: .success, activeSessionID: nil)
         )
+    }
+
+    func testSoftSpeechNotDetectedByVadStillTranscribes() async {
+        let audio = BorderlineVADAudioCapture()
+        let recognizer = CountingBorrowingRecognizer()
+        let insertion = RecordingInsertion()
+        let coordinator = makeCoordinator(
+            audioCapture: audio,
+            recognizer: recognizer,
+            insertion: insertion
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+        let transcriptionCount = await recognizer.transcriptionCount()
+        let insertionCount = await insertion.count()
+
+        XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect))
+        XCTAssertEqual(transcriptionCount, 1)
+        XCTAssertEqual(insertionCount, 1)
     }
 
     func testRecognizerEmptyResultIsPresentedAsNoSpeechInsteadOfUnavailable() async {
@@ -155,6 +262,205 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
             [.local(LocalCandidate(text: "Hallo Welt."))]
         )
         XCTAssertEqual(rewriteCount, 1)
+
+        let highConfidenceInsertion = RecordingInsertion()
+        let highConfidenceRewriter = RecordingTextRewriter(output: "Nicht verwenden.")
+        let highConfidenceCoordinator = makeCoordinator(
+            recognizer: MetadataRecognizer(
+                text: "Hallo Welt.",
+                avgLogprob: -0.1,
+                minWordProbability: 0.95,
+                compressionRatio: 1.0,
+                decoderFallback: RecognitionDecoderFallback.none
+            ),
+            localRewriter: highConfidenceRewriter,
+            insertion: highConfidenceInsertion
+        )
+        let highConfidenceSessionID = startedSessionID(
+            await highConfidenceCoordinator.start(language: .german)
+        )
+
+        let highConfidenceOutcome = await highConfidenceCoordinator.stop(
+            sessionID: highConfidenceSessionID
+        )
+        let highConfidenceCandidates = await highConfidenceInsertion.candidates()
+        let highConfidenceRewriteCount = await highConfidenceRewriter.rewriteCount()
+
+        XCTAssertEqual(
+            highConfidenceOutcome,
+            .completed(highConfidenceSessionID, .confirmedDirect)
+        )
+        XCTAssertEqual(
+            highConfidenceCandidates,
+            [.local(LocalCandidate(text: "Hallo Welt."))]
+        )
+        XCTAssertEqual(highConfidenceRewriteCount, 0)
+
+        let subordinateInsertion = RecordingInsertion()
+        let subordinateRewriter = RecordingTextRewriter(output: "Nicht verwenden.")
+        let subordinateCoordinator = makeCoordinator(
+            recognizer: MetadataRecognizer(
+                text: "Also wenn wir das nochmal testen, kannst du auch gleich gucken, ob die Formatierung stimmt.",
+                avgLogprob: -0.1,
+                minWordProbability: 0.95,
+                compressionRatio: 1.0,
+                decoderFallback: RecognitionDecoderFallback.none
+            ),
+            cleanup: DeterministicCleanupEngine(),
+            localRewriter: subordinateRewriter,
+            insertion: subordinateInsertion
+        )
+        let subordinateSessionID = startedSessionID(
+            await subordinateCoordinator.start(language: .german)
+        )
+
+        let subordinateOutcome = await subordinateCoordinator.stop(
+            sessionID: subordinateSessionID
+        )
+        let subordinateCandidates = await subordinateInsertion.candidates()
+        let subordinateRewriteCount = await subordinateRewriter.rewriteCount()
+
+        XCTAssertEqual(
+            subordinateOutcome,
+            .completed(subordinateSessionID, .confirmedDirect)
+        )
+        XCTAssertEqual(
+            subordinateCandidates,
+            [.local(LocalCandidate(
+                text: "Wenn wir das noch einmal testen, kannst du auch gleich gucken, ob die Formatierung stimmt."
+            ))]
+        )
+        XCTAssertEqual(subordinateRewriteCount, 0)
+
+        let rewriteRequiredCases: [(String, RawTranscript)] = [
+            (
+                "low average logprob",
+                RawTranscript(
+                    text: "Hallo Welt.",
+                    language: .german,
+                    avgLogprob: -0.6,
+                    minWordProbability: 0.95,
+                    compressionRatio: 1.0,
+                    decoderFallback: RecognitionDecoderFallback.none
+                )
+            ),
+            (
+                "unknown confidence",
+                RawTranscript(text: "Hallo Welt.", language: .german)
+            ),
+            (
+                "backtracking",
+                RawTranscript(
+                    text: "Wir testen wir testen das.",
+                    language: .german,
+                    avgLogprob: -0.1,
+                    minWordProbability: 0.95,
+                    compressionRatio: 1.0,
+                    decoderFallback: RecognitionDecoderFallback.none
+                )
+            ),
+            (
+                "fragment",
+                RawTranscript(
+                    text: "Und dann",
+                    language: .german,
+                    avgLogprob: -0.1,
+                    minWordProbability: 0.95,
+                    compressionRatio: 1.0,
+                    decoderFallback: RecognitionDecoderFallback.none
+                )
+            ),
+            (
+                "raw subordinate fragment",
+                RawTranscript(
+                    text: "weil der Build",
+                    language: .german,
+                    avgLogprob: -0.1,
+                    minWordProbability: 0.95,
+                    compressionRatio: 1.0,
+                    decoderFallback: RecognitionDecoderFallback.none
+                )
+            ),
+            (
+                "nil decoder metadata",
+                RawTranscript(
+                    text: "Hallo Welt.",
+                    language: .german,
+                    avgLogprob: -0.1,
+                    minWordProbability: 0.95,
+                    compressionRatio: 1.0,
+                    decoderFallback: nil
+                )
+            )
+        ]
+        for (label, transcript) in rewriteRequiredCases {
+            let requiredInsertion = RecordingInsertion()
+            let requiredRewriter = RecordingTextRewriter(output: "Rewritten \(label).")
+            let requiredCoordinator = makeCoordinator(
+                recognizer: MetadataRecognizer(transcript: transcript),
+                localRewriter: requiredRewriter,
+                insertion: requiredInsertion
+            )
+            let requiredSessionID = startedSessionID(
+                await requiredCoordinator.start(language: .german)
+            )
+
+            let requiredOutcome = await requiredCoordinator.stop(sessionID: requiredSessionID)
+            let requiredCandidates = await requiredInsertion.candidates()
+            let requiredRewriteCount = await requiredRewriter.rewriteCount()
+
+            XCTAssertEqual(
+                requiredOutcome,
+                .completed(requiredSessionID, .confirmedDirect),
+                label
+            )
+            XCTAssertEqual(
+                requiredCandidates,
+                [.local(LocalCandidate(text: "Rewritten \(label)."))],
+                label
+            )
+            XCTAssertEqual(requiredRewriteCount, 1, label)
+        }
+
+        let contextInsertion = RecordingInsertion()
+        let contextRewriter = RecordingTextRewriter(output: "Rewritten context dependent.")
+        let contextCoordinator = makeCoordinator(
+            contextProvider: StaticContextProvider(
+                context: ContextSnapshot(
+                    availability: .available,
+                    targetKind: .chat,
+                    boundedText: "Projekt: Nebelstern",
+                    termHints: [],
+                    localCategory: .workMessaging
+                )
+            ),
+            recognizer: MetadataRecognizer(
+                text: "Prüfe das Projekt erneut.",
+                avgLogprob: -0.1,
+                minWordProbability: 0.95,
+                compressionRatio: 1.0,
+                decoderFallback: RecognitionDecoderFallback.none
+            ),
+            localRewriter: contextRewriter,
+            insertion: contextInsertion
+        )
+        let contextSessionID = startedSessionID(
+            await contextCoordinator.start(language: .german)
+        )
+
+        let contextOutcome = await contextCoordinator.stop(sessionID: contextSessionID)
+        let contextCandidates = await contextInsertion.candidates()
+        let contextRewriteCount = await contextRewriter.rewriteCount()
+
+        XCTAssertEqual(
+            contextOutcome,
+            .completed(contextSessionID, .confirmedDirect)
+        )
+        XCTAssertEqual(
+            contextCandidates,
+            [.local(LocalCandidate(text: "Rewritten context dependent."))]
+        )
+        XCTAssertEqual(contextRewriteCount, 1)
     }
 
     func testCloudSuccessRunsCloudAsTheOnlyPrimaryRewriter() async {
@@ -335,10 +641,12 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         await releaseCapture.open()
         let startOutcome = await startTask.value
         let audioStartCount = await audio.startCount()
+        let audioCancelCount = await audio.cancelCount()
 
         XCTAssertEqual(cancelOutcome, .cancelled(sessionID))
         XCTAssertEqual(startOutcome, .ignoredStale(sessionID))
         XCTAssertEqual(audioStartCount, 0)
+        XCTAssertEqual(audioCancelCount, 1)
     }
 
     func testCancelDuringListeningReleasesAudioCapture() async {
@@ -746,6 +1054,19 @@ private struct TestContextProvider: TargetContextProviding {
     func cancel(sessionID: DictationSessionID) async {}
 }
 
+private struct StaticContextProvider: TargetContextProviding {
+    let context: ContextSnapshot
+
+    func capture(for sessionID: DictationSessionID) async throws -> CapturedTargetContext {
+        CapturedTargetContext(
+            target: capturedContext(for: sessionID).target,
+            context: context
+        )
+    }
+
+    func cancel(sessionID: DictationSessionID) async {}
+}
+
 private struct UnavailableTargetContextProvider: TargetContextProviding {
     func capture(for sessionID: DictationSessionID) async throws -> CapturedTargetContext {
         CapturedTargetContext(
@@ -768,6 +1089,39 @@ private struct SensitiveTargetContextProvider: TargetContextProviding {
                 termHints: []
             )
         )
+    }
+
+    func cancel(sessionID: DictationSessionID) async {}
+}
+
+private actor SplitGatedContextProvider: TargetContextProviding {
+    private let enrichmentStarted: AsyncGate
+    private let releaseEnrichment: AsyncGate
+
+    init(
+        enrichmentStarted: AsyncGate,
+        releaseEnrichment: AsyncGate
+    ) {
+        self.enrichmentStarted = enrichmentStarted
+        self.releaseEnrichment = releaseEnrichment
+    }
+
+    func capture(for sessionID: DictationSessionID) async throws -> CapturedTargetContext {
+        let target = try await captureTarget(for: sessionID)
+        return try await enrichContext(for: target, sessionID: sessionID)
+    }
+
+    func captureTarget(for sessionID: DictationSessionID) async throws -> CapturedTargetContext {
+        capturedContext(for: sessionID)
+    }
+
+    func enrichContext(
+        for captured: CapturedTargetContext,
+        sessionID _: DictationSessionID
+    ) async throws -> CapturedTargetContext {
+        await enrichmentStarted.open()
+        await releaseEnrichment.wait()
+        return captured
     }
 
     func cancel(sessionID: DictationSessionID) async {}
@@ -899,6 +1253,42 @@ private actor SilentAudioCapture: AudioCapturing {
     func releaseCount() -> Int { releases }
 }
 
+private actor BorderlineVADAudioCapture: AudioCapturing {
+    private var releases = 0
+
+    func startCapture(for sessionID: DictationSessionID) async throws {}
+
+    func finishCapture(for sessionID: DictationSessionID) async throws -> AudioInput {
+        AudioInput(
+            buffer: AudioBufferHandle(rawValue: sessionID.rawValue),
+            timing: AudioTimingMetadata(
+                originalDurationSeconds: 1,
+                processedDurationSeconds: 0.11,
+                leadingSilenceTrimmedSeconds: 0,
+                trailingSilenceTrimmedSeconds: 0,
+                detectedSpeechDurationSeconds: 0,
+                isSilent: true,
+                removedDCOffset: 0,
+                appliedGain: 1,
+                inputRMS: 0.03,
+                inputPeak: 0.03,
+                normalizedRMS: 0.03,
+                normalizedPeak: 0.03
+            )
+        )
+    }
+
+    func cancelCapture(for sessionID: DictationSessionID) async {}
+
+    func release(_ input: AudioInput) async {
+        releases += 1
+    }
+
+    func releaseCount() -> Int {
+        releases
+    }
+}
+
 private actor StreamingAudioCapture: AudioCapturing, IncrementalAudioProviding {
     private var deliveredPrefix = false
 
@@ -983,6 +1373,58 @@ private actor StreamingLifecycleRecognizer: SpeechRecognizing, SpeechRecognition
     func recordedEvents() -> [String] { events }
 }
 
+private actor FastReleaseLifecycleRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
+    private var events: [String] = []
+
+    func transcribe(
+        _ audio: AudioInput,
+        hints: RecognitionHints,
+        sessionID: DictationSessionID
+    ) async throws -> RawTranscript {
+        events.append("transcribe")
+        return RawTranscript(text: "schneller test", language: hints.language)
+    }
+
+    func cancel(sessionID: DictationSessionID) async {
+        events.append("cancel")
+    }
+
+    func prepareForRecording(
+        hints: RecognitionHints,
+        sessionID: DictationSessionID
+    ) async throws {}
+
+    func startRecognitionSession(
+        hints: RecognitionHints,
+        sessionID: DictationSessionID
+    ) async throws {
+        events.append("start")
+    }
+
+    func updateRecognitionSession(
+        with chunk: RecognitionAudioChunk,
+        sessionID: DictationSessionID
+    ) async throws -> RecognitionChunkDisposition {
+        events.append("update")
+        return .accepted
+    }
+
+    func stopRecognitionSession(sessionID: DictationSessionID) async {
+        events.append("stop")
+    }
+
+    func finalizeRecognitionSession(
+        _ audio: AudioInput,
+        hints: RecognitionHints,
+        sessionID: DictationSessionID
+    ) async throws -> RawTranscript {
+        events.append("finalize")
+        throw TestFailure.expected
+    }
+
+    func recordedEvents() -> [String] { events }
+}
+
 private struct ImmediateRecognizer: SpeechRecognizing {
     func transcribe(
         _ audio: AudioInput,
@@ -990,6 +1432,54 @@ private struct ImmediateRecognizer: SpeechRecognizing {
         sessionID: DictationSessionID
     ) async throws -> RawTranscript {
         RawTranscript(text: "hello", language: hints.language)
+    }
+
+    func cancel(sessionID: DictationSessionID) async {}
+}
+
+private struct MetadataRecognizer: SpeechRecognizing {
+    private let transcript: RawTranscript
+
+    init(
+        text: String,
+        avgLogprob: Float? = nil,
+        minWordProbability: Float? = nil,
+        compressionRatio: Float? = nil,
+        decoderFallback: RecognitionDecoderFallback? = RecognitionDecoderFallback.none,
+        adaptive: AdaptiveRecognitionMetadata? = nil
+    ) {
+        self.transcript = RawTranscript(
+            text: text,
+            language: .german,
+            avgLogprob: avgLogprob,
+            minWordProbability: minWordProbability,
+            compressionRatio: compressionRatio,
+            decoderFallback: decoderFallback,
+            adaptive: adaptive
+        )
+    }
+
+    init(transcript: RawTranscript) {
+        self.transcript = transcript
+    }
+
+    func transcribe(
+        _ audio: AudioInput,
+        hints: RecognitionHints,
+        sessionID: DictationSessionID
+    ) async throws -> RawTranscript {
+        RawTranscript(
+            text: transcript.text,
+            language: hints.language,
+            backend: transcript.backend,
+            segments: transcript.segments,
+            wordProbabilities: transcript.wordProbabilities,
+            avgLogprob: transcript.avgLogprob,
+            minWordProbability: transcript.minWordProbability,
+            compressionRatio: transcript.compressionRatio,
+            decoderFallback: transcript.decoderFallback,
+            adaptive: transcript.adaptive
+        )
     }
 
     func cancel(sessionID: DictationSessionID) async {}

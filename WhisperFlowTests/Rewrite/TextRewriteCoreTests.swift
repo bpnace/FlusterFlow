@@ -188,12 +188,19 @@ final class TextRewriteCoreTests: XCTestCase {
             request: request,
             proposedText: "Schick verifyTargetToken an Anna mit Link https://example.com. Sie hat alles freigegeben."
         )
+        let appendedMeta = validator.validate(
+            request: makeRequest(
+                text: "OK, testen wir noch einmal, ob es funktioniert. Versuch mal, jetzt diesen Text einzusetzen und dann gucken wir, ob alles klappt wie es soll."
+            ),
+            proposedText: "OK, testen wir noch einmal, ob es funktioniert. Versuch mal, jetzt diesen Text einzusetzen und dann gucken wir, ob alles klappt wie es soll. Ich habe das jetzt. Schaut."
+        )
 
         XCTAssertTrue(newNumber.issues.contains(.lostProtectedAnchor))
         XCTAssertTrue(newNegation.issues.contains(.lostProtectedAnchor))
         XCTAssertTrue(changedURL.issues.contains(.lostProtectedAnchor))
         XCTAssertTrue(changedID.issues.contains(.lostProtectedAnchor))
         XCTAssertTrue(newClaim.issues.contains(.inventedClaim))
+        XCTAssertTrue(appendedMeta.issues.contains(.inventedClaim))
     }
 
     func testMeaningValidatorProtectsNamesButAllowsContextSupportedSpellingRepair() {
@@ -399,6 +406,25 @@ final class TextRewriteCoreTests: XCTestCase {
         XCTAssertEqual(result.outcome, .rejected)
         XCTAssertEqual(result.outputText, source)
         XCTAssertTrue(result.validationIssues.contains(.lostProtectedAnchor))
+
+        let spokenSource = "OK, testen wir noch einmal, ob es funktioniert. Versuch mal, jetzt diesen Text einzusetzen und dann gucken wir, ob alles klappt wie es soll."
+        let hallucinatingModel = RecordingRewriteModel(
+            availability: .available,
+            response: .success(
+                LocalRewriteModelResponse(
+                    rewrittenText: "\(spokenSource) Ich habe das jetzt. Schaut."
+                )
+            )
+        )
+        let hallucinationRewriter = FoundationModelsTextRewriter(model: hallucinatingModel)
+
+        let hallucinationResult = await hallucinationRewriter.rewrite(
+            makeRequest(text: spokenSource)
+        )
+
+        XCTAssertEqual(hallucinationResult.outcome, .rejected)
+        XCTAssertEqual(hallucinationResult.outputText, spokenSource)
+        XCTAssertTrue(hallucinationResult.validationIssues.contains(.inventedClaim))
     }
 
     func testLogicalRegressionHasCleanChatEmailAndDocumentEndFormatting() async {
@@ -518,9 +544,11 @@ final class TextRewriteCoreTests: XCTestCase {
             )
         )
         let prewarmCalls = await model.prewarmCallCount()
+        let prewarmRequests = await model.prewarmRequestsSnapshot()
 
         XCTAssertEqual(result, .warmed)
         XCTAssertEqual(prewarmCalls, 1)
+        XCTAssertEqual(prewarmRequests.map(\.sessionID), [DictationSessionID(rawValue: 77)])
     }
 
     func testFoundationModelsRewriterFallsBackWhenValidationRejectsModelOutput() async {
@@ -592,6 +620,14 @@ final class TextRewriteCoreTests: XCTestCase {
         guard availability.isAvailable else {
             throw XCTSkip("Foundation Models rewriter is unavailable on this machine")
         }
+        try await installedModel.prewarm(
+            request: LocalRewriteModelPrewarmRequest(
+                sessionID: request.sessionID,
+                language: request.language,
+                context: request.context,
+                promptPrefix: "Sprache: Deutsch"
+            )
+        )
         let response = try await installedModel.rewrite(request: request)
         let rewriter = FoundationModelsTextRewriter(
             model: RecordingRewriteModel(
@@ -659,6 +695,14 @@ final class TextRewriteCoreTests: XCTestCase {
         guard availability.isAvailable else {
             throw XCTSkip("Foundation Models rewriter is unavailable on this machine")
         }
+        try await installedModel.prewarm(
+            request: LocalRewriteModelPrewarmRequest(
+                sessionID: request.sessionID,
+                language: request.language,
+                context: request.context,
+                promptPrefix: "Sprache: Deutsch"
+            )
+        )
         let response = try await installedModel.rewrite(request: request)
         let rewriter = FoundationModelsTextRewriter(
             model: RecordingRewriteModel(
@@ -712,6 +756,7 @@ private actor RecordingRewriteModel: LocalRewriteModeling {
     private let response: RecordingRewriteResponse
     private var calls = 0
     private var prewarmCalls = 0
+    private var prewarmRequests: [LocalRewriteModelPrewarmRequest] = []
 
     init(
         availability: LocalRewriteAvailability,
@@ -735,6 +780,7 @@ private actor RecordingRewriteModel: LocalRewriteModeling {
 
     func prewarm(request: LocalRewriteModelPrewarmRequest) async throws {
         prewarmCalls += 1
+        prewarmRequests.append(request)
         let availability = await availability(for: request.language)
         guard availability.isAvailable else {
             throw LocalRewriteModelError.unavailable(
@@ -749,6 +795,10 @@ private actor RecordingRewriteModel: LocalRewriteModeling {
 
     func prewarmCallCount() -> Int {
         prewarmCalls
+    }
+
+    func prewarmRequestsSnapshot() -> [LocalRewriteModelPrewarmRequest] {
+        prewarmRequests
     }
 }
 

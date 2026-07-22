@@ -123,6 +123,7 @@ actor FoundationModelsTextRewriter: TextRewriting, TextRewritePrewarming {
         do {
             try await model.prewarm(
                 request: LocalRewriteModelPrewarmRequest(
+                    sessionID: request.sessionID,
                     language: request.language,
                     context: request.context,
                     promptPrefix: request.promptPrefix

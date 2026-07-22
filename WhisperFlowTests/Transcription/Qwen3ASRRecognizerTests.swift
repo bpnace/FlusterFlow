@@ -42,6 +42,7 @@ final class Qwen3ASRRecognizerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(snapshot.modelDirectory, modelDirectory)
         XCTAssertEqual(snapshot.prepareCount, 1)
         XCTAssertEqual(snapshot.languages, [.automatic, .german, .english])
+        XCTAssertFalse(Qwen3ASRRecognizerError.emptyTranscription.indicatesNoSpeech)
         for input in inputs {
             await samples.release(input)
         }

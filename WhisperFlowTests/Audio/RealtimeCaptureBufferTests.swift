@@ -26,7 +26,7 @@ final class RealtimeCaptureBufferTests: XCTestCase {
         )
     }
 
-    func testTapBufferMixesPlanarChannelsDirectlyIntoPreallocatedMonoStorage() throws {
+    func testTapBufferUsesHighestEnergyChannelWithoutDilutingSpeech() throws {
         let accumulator = try XCTUnwrap(
             RealtimeCaptureBuffer(sampleRate: 4, channelCount: 2, maximumDurationSeconds: 1)
         )
@@ -46,7 +46,45 @@ final class RealtimeCaptureBufferTests: XCTestCase {
         XCTAssertEqual(snapshot.capturedFrameCount, 4)
         XCTAssertEqual(snapshot.chunks.count, 1)
         XCTAssertEqual(snapshot.chunks[0].sampleRate, 4)
-        XCTAssertEqual(snapshot.chunks[0].monoSamples, [0, 0.5, 0, 0.5])
+        XCTAssertEqual(snapshot.chunks[0].monoSamples, [-1, 1, 1, 0.5])
+    }
+
+    func testOppositePhaseChannelsCannotCancelCapturedSpeech() throws {
+        let accumulator = try XCTUnwrap(
+            RealtimeCaptureBuffer(sampleRate: 4, channelCount: 2, maximumDurationSeconds: 1)
+        )
+        let buffer = try makeBuffer(
+            sampleRate: 4,
+            channels: [
+                [0.2, -0.3, 0.4, -0.5],
+                [-0.2, 0.3, -0.4, 0.5]
+            ]
+        )
+
+        XCTAssertEqual(accumulator.append(buffer), .accepted)
+        XCTAssertEqual(
+            accumulator.snapshot().chunks[0].monoSamples,
+            [0.2, -0.3, 0.4, -0.5]
+        )
+    }
+
+    func testSilentSecondaryChannelCannotAttenuateCapturedSpeech() throws {
+        let accumulator = try XCTUnwrap(
+            RealtimeCaptureBuffer(sampleRate: 4, channelCount: 2, maximumDurationSeconds: 1)
+        )
+        let buffer = try makeBuffer(
+            sampleRate: 4,
+            channels: [
+                [0.2, -0.3, 0.4, -0.5],
+                [0, 0, 0, 0]
+            ]
+        )
+
+        XCTAssertEqual(accumulator.append(buffer), .accepted)
+        XCTAssertEqual(
+            accumulator.snapshot().chunks[0].monoSamples,
+            [0.2, -0.3, 0.4, -0.5]
+        )
     }
 
     func testIncrementalSnapshotsReturnOnlyNewFramesWithoutSealingCapture() throws {
@@ -180,7 +218,7 @@ final class RealtimeCaptureBufferTests: XCTestCase {
         XCTAssertTrue(renderPath.contains("Atomic" ) == false)
     }
 
-    func testEveryTerminalLifecyclePathUsesCentralSealBeforeTapRemoval() throws {
+    func testEveryLifecyclePathUsesCentralSealBeforeTapRemoval() throws {
         let source = try captureSource()
         let stopStart = try XCTUnwrap(source.range(of: "private func stopEngine()"))
         let clearStart = try XCTUnwrap(
@@ -196,11 +234,12 @@ final class RealtimeCaptureBufferTests: XCTestCase {
 
         XCTAssertLessThan(seal.lowerBound, removeTap.lowerBound)
         XCTAssertLessThan(removeTap.lowerBound, stop.lowerBound)
-        XCTAssertTrue(source.contains("terminalError = .deviceConfigurationChanged\n        stopEngine()"))
+        XCTAssertTrue(source.contains("preserveCurrentAccumulator()"))
+        XCTAssertTrue(source.contains("completedAccumulators.append(accumulator)"))
         XCTAssertTrue(source.contains("func cancelCapture(for sessionID: DictationSessionID) async"))
     }
 
-    func testAutomaticModeLeavesInputSelectionToTheMacOSSystemDefault() throws {
+    func testCaptureAlwaysLeavesInputSelectionToTheMacOSSystemDefault() throws {
         let source = try captureSource()
         let start = try XCTUnwrap(source.range(of: "func startCapture"))
         let finish = try XCTUnwrap(
@@ -211,52 +250,124 @@ final class RealtimeCaptureBufferTests: XCTestCase {
         )
         let startBody = String(source[start.lowerBound..<finish.lowerBound])
 
-        XCTAssertTrue(startBody.contains("let requestedUID = await selectedInputUID()"))
-        XCTAssertTrue(startBody.contains("activateEngine(withUID: requestedUID"))
+        XCTAssertTrue(startBody.contains("try activateEngine(for: sessionID)"))
+        XCTAssertFalse(startBody.contains("await selectedInputUID()"))
+        XCTAssertFalse(source.contains("selectedInputUID"))
+        XCTAssertFalse(source.contains("AudioUnitSetProperty"))
+        XCTAssertFalse(source.contains("selectInputDevice"))
+        XCTAssertFalse(source.contains("audioDeviceID(withUID:"))
         XCTAssertFalse(startBody.contains("CoreAudioInputDevices"))
         XCTAssertFalse(source.contains("automaticCandidates"))
         XCTAssertFalse(source.contains("kAudioHardwarePropertyDefaultInputDevice"))
     }
 
-    func testExpectedInputDeviceReconfigurationKeepsCaptureAlive() {
-        XCTAssertFalse(
-            AVAudioEngineCapture.configurationChangeRequiresTermination(
-                engineRunning: true,
-                expectedSampleRate: 48_000,
-                expectedChannelCount: 1,
-                currentSampleRate: 48_000,
-                currentChannelCount: 1
+    func testTapUsesSmallRealtimeBuffer() throws {
+        let source = try captureSource()
+
+        XCTAssertTrue(source.contains("installTap(onBus: 0, bufferSize: 512"))
+        XCTAssertFalse(source.contains("bufferSize: 2_048"))
+        XCTAssertEqual(RealtimeCaptureBuffer.maximumChannelSelectionSamples, 64)
+        XCTAssertTrue(source.contains("frameCount / Self.maximumChannelSelectionSamples"))
+    }
+
+    func testConfigurationChangesRecreateEngineAndPreservePriorChunks() throws {
+        let source = try captureSource()
+        let recoverStart = try XCTUnwrap(source.range(of: "private func recoverFromConfigurationChange"))
+        let activateStart = try XCTUnwrap(
+            source.range(
+                of: "private func activateEngine",
+                range: recoverStart.upperBound..<source.endIndex
             )
+        )
+        let recoverBody = String(source[recoverStart.lowerBound..<activateStart.lowerBound])
+
+        XCTAssertTrue(source.contains("await self?.recoverFromConfigurationChange(for: sessionID)"))
+        XCTAssertTrue(recoverBody.contains("preserveCurrentAccumulator()"))
+        XCTAssertTrue(recoverBody.contains("stopEngine()"))
+        XCTAssertTrue(recoverBody.contains("removeConfigurationObserver()"))
+        XCTAssertTrue(recoverBody.contains("try activateEngine(for: sessionID)"))
+        XCTAssertTrue(recoverBody.contains("terminalError = error"))
+        XCTAssertTrue(recoverBody.contains("terminalError = .inputUnavailable"))
+        XCTAssertFalse(recoverBody.contains("usableCapturedChunksExist()"))
+    }
+
+    func testReconnectsPreserveTotalDurationCapAndStreamingOffset() throws {
+        let source = try captureSource()
+
+        XCTAssertTrue(source.contains("let remainingDuration = remainingCaptureDurationSeconds()"))
+        XCTAssertTrue(source.contains("maximumDurationSeconds: remainingDuration"))
+        XCTAssertTrue(source.contains("Self.maximumCaptureDurationSeconds - completedCaptureDurationSeconds()"))
+        XCTAssertTrue(source.contains("let completedFrameOffset = completedCapturedFrameCount()"))
+        XCTAssertTrue(source.contains("let localFrameOffset = max(0, frameOffset - completedFrameOffset)"))
+        XCTAssertTrue(source.contains("nextFrameOffset: completedFrameOffset + snapshot.nextFrameOffset"))
+    }
+
+    func testFinishDoesNotHideReconnectFailureBehindUsableAudio() throws {
+        let source = try captureSource()
+        let finishStart = try XCTUnwrap(source.range(of: "func finishCapture"))
+        let incrementalStart = try XCTUnwrap(
+            source.range(
+                of: "func incrementalAudioBatch",
+                range: finishStart.upperBound..<source.endIndex
+            )
+        )
+        let finishBody = String(source[finishStart.lowerBound..<incrementalStart.lowerBound])
+
+        XCTAssertTrue(finishBody.contains("let snapshot = aggregateSnapshot()"))
+        XCTAssertTrue(source.contains("let chunks = snapshots.flatMap(\\.chunks)"))
+        XCTAssertTrue(source.contains("chunks.isEmpty && failures.contains(.formatChanged)"))
+        XCTAssertFalse(source.contains("usableCapturedChunksExist()"))
+    }
+
+    func testFinalizationNeverHidesHardCaptureFailuresBehindAUsablePrefix() {
+        let prefix = CapturedAudioChunk(monoSamples: [0.1, -0.1], sampleRate: 48_000)
+
+        XCTAssertEqual(
+            AVAudioEngineCapture.finalizationError(
+                for: snapshot(chunks: [prefix], failure: .maximumDurationExceeded),
+                terminalError: nil
+            ),
+            .maximumDurationExceeded
+        )
+        XCTAssertEqual(
+            AVAudioEngineCapture.finalizationError(
+                for: snapshot(chunks: [prefix], failure: .writerDidNotQuiesce),
+                terminalError: nil
+            ),
+            .normalizationFailed
         )
     }
 
-    func testStoppedOrIncompatibleInputDeviceTerminatesCapture() {
-        XCTAssertTrue(
-            AVAudioEngineCapture.configurationChangeRequiresTermination(
-                engineRunning: false,
-                expectedSampleRate: 48_000,
-                expectedChannelCount: 1,
-                currentSampleRate: 48_000,
-                currentChannelCount: 1
-            )
+    func testFinalizationSurfacesReconnectFailureAfterAValidPrefix() {
+        let prefix = CapturedAudioChunk(monoSamples: [0.1, -0.1], sampleRate: 48_000)
+
+        XCTAssertEqual(
+            AVAudioEngineCapture.finalizationError(
+                for: snapshot(chunks: [prefix], failure: .formatChanged),
+                terminalError: .inputUnavailable
+            ),
+            .inputUnavailable
         )
-        XCTAssertTrue(
-            AVAudioEngineCapture.configurationChangeRequiresTermination(
-                engineRunning: true,
-                expectedSampleRate: 48_000,
-                expectedChannelCount: 1,
-                currentSampleRate: 24_000,
-                currentChannelCount: 1
-            )
+        XCTAssertEqual(
+            AVAudioEngineCapture.finalizationError(
+                for: snapshot(chunks: [prefix], failure: nil),
+                terminalError: .inputUnavailable
+            ),
+            .inputUnavailable
         )
-        XCTAssertTrue(
-            AVAudioEngineCapture.configurationChangeRequiresTermination(
-                engineRunning: true,
-                expectedSampleRate: 48_000,
-                expectedChannelCount: 1,
-                currentSampleRate: 48_000,
-                currentChannelCount: 2
-            )
+        XCTAssertEqual(
+            AVAudioEngineCapture.finalizationError(
+                for: snapshot(chunks: [], failure: nil),
+                terminalError: .inputUnavailable
+            ),
+            .inputUnavailable
+        )
+        XCTAssertEqual(
+            AVAudioEngineCapture.finalizationError(
+                for: snapshot(chunks: [], failure: .formatChanged),
+                terminalError: nil
+            ),
+            .deviceConfigurationChanged
         )
     }
 
@@ -288,6 +399,19 @@ final class RealtimeCaptureBufferTests: XCTestCase {
             }
         }
         return buffer
+    }
+
+    private func snapshot(
+        chunks: [CapturedAudioChunk],
+        failure: RealtimeCaptureBuffer.Failure?
+    ) -> RealtimeCaptureBuffer.Snapshot {
+        RealtimeCaptureBuffer.Snapshot(
+            chunks: chunks,
+            maximumDurationExceeded: failure == .maximumDurationExceeded,
+            failure: failure,
+            capturedFrameCount: chunks.reduce(0) { $0 + $1.monoSamples.count },
+            capacity: chunks.reduce(0) { $0 + $1.monoSamples.count }
+        )
     }
 
     private func captureSource() throws -> String {
