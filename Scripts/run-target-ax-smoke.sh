@@ -23,7 +23,7 @@ trap cleanup EXIT
 harness_pid=$!
 
 for _ in $(seq 1 60); do
-  if rg -q '^READY ' "$ready_file"; then
+  if grep -q -E '^READY ' "$ready_file"; then
     break
   fi
   if ! kill -0 "$harness_pid" 2>/dev/null; then
@@ -34,7 +34,7 @@ for _ in $(seq 1 60); do
   sleep 0.1
 done
 
-if ! rg -q '^READY ' "$ready_file"; then
+if ! grep -q -E '^READY ' "$ready_file"; then
   echo "TextTargetHarness readiness timeout" >&2
   exit 1
 fi

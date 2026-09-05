@@ -24,7 +24,6 @@ jobs:
 
       - name: Verify required tools
         run: |
-          command -v rg
           command -v jq
 
       - name: Report toolchain
