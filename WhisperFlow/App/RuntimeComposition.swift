@@ -792,18 +792,12 @@ struct DictationComposition {
                 settings?.language ?? .automatic
             },
             correctionSink: { [weak settings, weak personalLexicon] correction in
-                let learningEnabled = await MainActor.run {
-                    settings?.localLearningEnabled ?? false
-                }
+                let learningEnabled = await settings?.localLearningEnabled ?? false
                 guard learningEnabled else { return }
-                let entries = await MainActor.run {
-                    personalLexicon?.entries ?? []
-                }
+                let entries = await personalLexicon?.entries ?? []
                 let learningStore = LocalPersonalLexiconStore(entries: entries)
                 let result = await learningStore.learn(from: correction)
-                await MainActor.run {
-                    personalLexicon?.applyLearningResult(result)
-                }
+                await personalLexicon?.applyLearningResult(result)
             }
         )
         let context = ExtractingTargetContextProvider(
@@ -825,15 +819,11 @@ struct DictationComposition {
         let localRewriter = FoundationModelsTextRewriter()
         let lexiconEntries: @Sendable (DictationLanguage) async -> [PersonalLexiconEntry] = {
             [weak personalLexicon] language in
-            await MainActor.run {
-                personalLexicon?.entries(for: language) ?? []
-            }
+            await personalLexicon?.entries(for: language) ?? []
         }
         let prioritizedLexiconTerms: @Sendable (DictationLanguage) async -> [String] = {
             [weak personalLexicon] language in
-            await MainActor.run {
-                personalLexicon?.prioritizedDecoderTerms(for: language) ?? []
-            }
+            await personalLexicon?.prioritizedDecoderTerms(for: language) ?? []
         }
         let fallbackResults = EphemeralResultStore()
         let sessionDiagnostics = ContentFreeSessionDiagnostics()
