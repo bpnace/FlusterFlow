@@ -792,14 +792,14 @@ struct DictationComposition {
                 settings?.language ?? .automatic
             },
             correctionSink: { [weak settings, weak personalLexicon] correction in
-                let state = await MainActor.run {
-                    (
-                        settings?.localLearningEnabled ?? false,
-                        personalLexicon?.entries ?? []
-                    )
+                let learningEnabled = await MainActor.run {
+                    settings?.localLearningEnabled ?? false
                 }
-                guard state.0 else { return }
-                let learningStore = LocalPersonalLexiconStore(entries: state.1)
+                guard learningEnabled else { return }
+                let entries = await MainActor.run {
+                    personalLexicon?.entries ?? []
+                }
+                let learningStore = LocalPersonalLexiconStore(entries: entries)
                 let result = await learningStore.learn(from: correction)
                 await MainActor.run {
                     personalLexicon?.applyLearningResult(result)
