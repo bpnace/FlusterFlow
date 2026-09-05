@@ -26,6 +26,12 @@ jobs:
         run: |
           command -v jq
 
+      - name: Select Swift 6.2 toolchain
+        run: |
+          developer_dir=/Applications/Xcode_26.0.1.app/Contents/Developer
+          test -x "$developer_dir/usr/bin/xcodebuild"
+          printf 'DEVELOPER_DIR=%s\n' "$developer_dir" >> "$GITHUB_ENV"
+
       - name: Report toolchain
         run: |
           xcodebuild -version

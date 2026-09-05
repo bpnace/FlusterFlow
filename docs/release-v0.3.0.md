@@ -23,7 +23,7 @@ Version 0.3.0 schließt die beiden Produktlücken aus GitHub #1 und #2:
 
 ## Automatische Release-Gates
 
-Die GitHub-CI läuft auf einem macOS-Runner ohne Signing-Identität oder API-Key. Sie führt aus:
+Die GitHub-CI läuft auf einem macOS-Runner mit dem explizit ausgewählten Xcode 26.0.1/Swift 6.2, ohne Signing-Identität oder API-Key. Sie führt aus:
 
 ```bash
 bash Scripts/run-capped-tests.sh --verify-only
