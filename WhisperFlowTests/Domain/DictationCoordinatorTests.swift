@@ -134,6 +134,78 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(candidates, [.local(LocalCandidate(text: "hello"))])
     }
 
+    func testFinalizedAudioIsPersistedBeforeTranscriptVersion() async {
+        let history = RecordingHistorySpy()
+        let coordinator = makeCoordinator(recordingHistory: history)
+        let sessionID = startedSessionID(await coordinator.start(language: .german))
+
+        _ = await coordinator.stop(sessionID: sessionID)
+        let events = await history.events()
+
+        XCTAssertEqual(events, ["begin:german", "audio", "transcript:hello"])
+    }
+
+    func testRecognitionFailureKeepsPersistedAudioMarkedFailed() async {
+        let history = RecordingHistorySpy()
+        let coordinator = makeCoordinator(
+            recognizer: FailingRecognizer(),
+            recordingHistory: history
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+
+        _ = await coordinator.stop(sessionID: sessionID)
+        let events = await history.events()
+
+        XCTAssertEqual(events, ["begin:automatic", "audio", "failed"])
+    }
+
+    func testHistoryBeginFailureStopsCaptureAndSurfacesError() async {
+        let audio = CountingAudioCapture()
+        let coordinator = makeCoordinator(
+            audioCapture: audio,
+            recordingHistory: FailingRecordingHistory(stage: .begin)
+        )
+
+        let outcome = await coordinator.start()
+
+        XCTAssertEqual(
+            outcome,
+            .failed(DictationSessionID(rawValue: 1), DictationFailure(stage: .audioStart))
+        )
+        let cancellationCount = await audio.cancelCount()
+        XCTAssertEqual(cancellationCount, 1)
+    }
+
+    func testAudioPersistenceFailurePreventsRecognition() async {
+        let recognizer = CountingBorrowingRecognizer()
+        let coordinator = makeCoordinator(
+            recognizer: recognizer,
+            recordingHistory: FailingRecordingHistory(stage: .audio)
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+
+        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .audioFinalize)))
+        let transcriptionCount = await recognizer.transcriptionCount()
+        XCTAssertEqual(transcriptionCount, 0)
+    }
+
+    func testTranscriptPersistenceFailurePreventsInsertion() async {
+        let insertion = RecordingInsertion()
+        let coordinator = makeCoordinator(
+            insertion: insertion,
+            recordingHistory: FailingRecordingHistory(stage: .transcript)
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+
+        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .recognition)))
+        let insertionCount = await insertion.count()
+        XCTAssertEqual(insertionCount, 0)
+    }
+
     func testIncrementalRecognitionStopsBeforeCanonicalFinalDecode() async {
         let firstUpdate = AsyncGate()
         let audio = StreamingAudioCapture()
@@ -1008,7 +1080,8 @@ private func makeCoordinator(
     enrichment: any TextEnriching = PassthroughEnrichment(),
     localRewriter: (any TextRewriting)? = nil,
     insertion: any TextInserting = RecordingInsertion(),
-    fallbackText: (any EphemeralTextPreserving)? = nil
+    fallbackText: (any EphemeralTextPreserving)? = nil,
+    recordingHistory: (any RecordingHistoryRecording)? = nil
 ) -> DictationCoordinator {
     DictationCoordinator(
         contextProvider: contextProvider,
@@ -1018,8 +1091,64 @@ private func makeCoordinator(
         enrichment: enrichment,
         localRewriter: localRewriter,
         insertion: insertion,
-        fallbackText: fallbackText
+        fallbackText: fallbackText,
+        recordingHistory: recordingHistory
     )
+}
+
+private actor RecordingHistorySpy: RecordingHistoryRecording {
+    private var recordedEvents: [String] = []
+
+    func begin(sessionID: DictationSessionID, language: DictationLanguage) {
+        recordedEvents.append("begin:\(language.storageValue)")
+    }
+
+    func persistAudio(_ input: AudioInput, sessionID: DictationSessionID) {
+        recordedEvents.append("audio")
+    }
+
+    func persistCheckpoint(_ chunk: RecognitionAudioChunk, sessionID: DictationSessionID) {
+        recordedEvents.append("checkpoint")
+    }
+
+    func persistTranscript(_ transcript: RawTranscript, sessionID: DictationSessionID) {
+        recordedEvents.append("transcript:\(transcript.text)")
+    }
+
+    func markFailed(sessionID: DictationSessionID) {
+        recordedEvents.append("failed")
+    }
+
+    func discard(sessionID: DictationSessionID) {
+        recordedEvents.append("discard")
+    }
+
+    func events() -> [String] { recordedEvents }
+}
+
+private struct FailingRecordingHistory: RecordingHistoryRecording {
+    enum Stage: Sendable { case begin, audio, transcript }
+    let stage: Stage
+
+    func begin(sessionID: DictationSessionID, language: DictationLanguage) throws {
+        if stage == .begin { throw TestFailure.expected }
+    }
+
+    func persistCheckpoint(
+        _ chunk: RecognitionAudioChunk,
+        sessionID: DictationSessionID
+    ) throws {}
+
+    func persistAudio(_ input: AudioInput, sessionID: DictationSessionID) throws {
+        if stage == .audio { throw TestFailure.expected }
+    }
+
+    func persistTranscript(_ transcript: RawTranscript, sessionID: DictationSessionID) throws {
+        if stage == .transcript { throw TestFailure.expected }
+    }
+
+    func markFailed(sessionID: DictationSessionID) {}
+    func discard(sessionID: DictationSessionID) {}
 }
 
 private func startedSessionID(

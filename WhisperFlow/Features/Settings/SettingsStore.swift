@@ -229,6 +229,7 @@ final class SettingsStore: ObservableObject {
         static let localLearning = "flusterflow.local-learning-enabled"
         static let language = "flusterflow.language"
         static let pushToTalkEnabled = "flusterflow.push-to-talk-enabled"
+        static let handsFreeEnabled = "flusterflow.hands-free-enabled"
         static let shortcut = "flusterflow.shortcut"
         static let legacySelectedMicrophone = "flusterflow.selected-microphone"
         static let localModel = "flusterflow.local-model"
@@ -253,6 +254,13 @@ final class SettingsStore: ObservableObject {
     @Published var pushToTalkEnabled: Bool {
         didSet {
             defaults.set(pushToTalkEnabled, forKey: Key.pushToTalkEnabled)
+            onPushToTalkConfigurationChanged?()
+        }
+    }
+
+    @Published var handsFreeEnabled: Bool {
+        didSet {
+            defaults.set(handsFreeEnabled, forKey: Key.handsFreeEnabled)
             onPushToTalkConfigurationChanged?()
         }
     }
@@ -314,6 +322,7 @@ final class SettingsStore: ObservableObject {
         } else {
             pushToTalkEnabled = defaults.bool(forKey: Key.pushToTalkEnabled)
         }
+        handsFreeEnabled = defaults.bool(forKey: Key.handsFreeEnabled)
         shortcut = Self.loadShortcut(from: defaults)
         localModel = LocalModelChoice(
             rawValue: defaults.string(forKey: Key.localModel) ?? ""

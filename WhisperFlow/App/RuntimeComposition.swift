@@ -781,6 +781,7 @@ struct DictationComposition {
         personalLexicon: PersonalLexiconStore,
         keyStore: any APIKeyStoring,
         diagnostics: ContentFreeDiagnostics,
+        recordingHistory: (any RecordingHistoryRecording)? = nil,
         transport: any CloudTextTransport = OpenAITransport()
     ) -> Self {
         let targets = AccessibilityTargetRegistry(
@@ -868,6 +869,7 @@ struct DictationComposition {
                 diagnostics: diagnostics
             ),
             fallbackText: fallbackResults,
+            recordingHistory: recordingHistory,
             prioritizedLexiconTerms: prioritizedLexiconTerms
         )
         return Self(

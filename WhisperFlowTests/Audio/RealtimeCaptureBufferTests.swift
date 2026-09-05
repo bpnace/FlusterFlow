@@ -319,16 +319,27 @@ final class RealtimeCaptureBufferTests: XCTestCase {
         XCTAssertFalse(source.contains("usableCapturedChunksExist()"))
     }
 
-    func testFinalizationNeverHidesHardCaptureFailuresBehindAUsablePrefix() {
+    func testFinalizationPreservesUsablePrefixAtMaximumDuration() {
         let prefix = CapturedAudioChunk(monoSamples: [0.1, -0.1], sampleRate: 48_000)
 
-        XCTAssertEqual(
+        XCTAssertNil(
             AVAudioEngineCapture.finalizationError(
                 for: snapshot(chunks: [prefix], failure: .maximumDurationExceeded),
+                terminalError: nil
+            )
+        )
+    }
+
+    func testFinalizationStillRejectsMaximumDurationWithoutAudioAndHardFailures() {
+        XCTAssertEqual(
+            AVAudioEngineCapture.finalizationError(
+                for: snapshot(chunks: [], failure: .maximumDurationExceeded),
                 terminalError: nil
             ),
             .maximumDurationExceeded
         )
+
+        let prefix = CapturedAudioChunk(monoSamples: [0.1, -0.1], sampleRate: 48_000)
         XCTAssertEqual(
             AVAudioEngineCapture.finalizationError(
                 for: snapshot(chunks: [prefix], failure: .writerDidNotQuiesce),

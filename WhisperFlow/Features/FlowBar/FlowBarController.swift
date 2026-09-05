@@ -101,8 +101,10 @@ enum FlowBarLayout {
 
     static func visibleWidth(for presentation: FlowBarPresentation) -> CGFloat {
         switch presentation {
-        case .priming, .listening, .processing:
+        case .priming, .processing:
             194
+        case .listening:
+            262
         case .cloudProcessing:
             202
         case .inserted:
@@ -150,6 +152,21 @@ enum FlowBarWaveformGeometry {
     }
 }
 
+enum RecordingTimerText {
+    static func elapsed(seconds: TimeInterval) -> String {
+        format(max(0, seconds))
+    }
+
+    static func remaining(seconds: TimeInterval) -> String {
+        "noch \(format(max(0, seconds)))"
+    }
+
+    private static func format(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded(.down))
+        return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+}
+
 @MainActor
 final class FlowBarController {
     private let panel: FocusPreservingPanel
@@ -191,6 +208,8 @@ final class FlowBarController {
 
     func show(
         _ presentation: FlowBarPresentation,
+        recordingStartedAt: Date? = nil,
+        handsFree: Bool = false,
         cancel: (() -> Void)? = nil
     ) {
         let cancelAction = presentation.supportsCancellation ? cancel : nil
@@ -198,6 +217,8 @@ final class FlowBarController {
         panel.setContentSize(windowSize)
         hostingView.rootView = FlowBarView(
             presentation: presentation,
+            recordingStartedAt: recordingStartedAt,
+            handsFree: handsFree,
             cancel: cancelAction
         )
         positionPanel()
@@ -235,6 +256,8 @@ final class FocusPreservingPanel: NSPanel {
 
 struct FlowBarView: View {
     let presentation: FlowBarPresentation
+    var recordingStartedAt: Date? = nil
+    var handsFree = false
     let cancel: (() -> Void)?
     var animationEnabled = true
 
@@ -300,6 +323,27 @@ struct FlowBarView: View {
                     .tracking(0.65)
                     .foregroundStyle(.white.opacity(0.78))
                     .lineLimit(1)
+
+                if presentation == .listening, let recordingStartedAt {
+                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                        let elapsed = max(0, timeline.date.timeIntervalSince(recordingStartedAt))
+                        Text(
+                            elapsed >= 105
+                                ? RecordingTimerText.remaining(seconds: 120 - elapsed)
+                                : RecordingTimerText.elapsed(seconds: elapsed)
+                        )
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(elapsed >= 105 ? .orange : .white.opacity(0.72))
+                        .monospacedDigit()
+                    }
+                }
+
+                if presentation == .listening, handsFree {
+                    Image(systemName: "hand.raised.fill")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.mint)
+                        .accessibilityLabel("Handsfree aktiv")
+                }
             }
         } else {
             HStack(spacing: 9) {

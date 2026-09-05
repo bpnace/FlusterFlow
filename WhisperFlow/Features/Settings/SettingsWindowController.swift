@@ -77,6 +77,12 @@ private struct LocalSettingsView: View {
 
                     Toggle("Push-to-talk aktivieren", isOn: $store.pushToTalkEnabled)
 
+                    Toggle("Handsfree per Doppeltipp", isOn: $store.handsFreeEnabled)
+                        .disabled(!store.pushToTalkEnabled)
+                    Text("Zweimal kurz drücken, um die Aufnahme ohne Halten fortzusetzen. Ein weiterer Druck beendet sie.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     LabeledContent("Tastenkürzel") {
                         ShortcutRecorderField(
                             shortcut: $store.shortcut,
@@ -161,7 +167,7 @@ private struct LocalSettingsView: View {
                         "Begrenzten Kontext am Cursor lokal verwenden",
                         isOn: $store.contextAwarenessEnabled
                     )
-                    Text("Maximal 1.500 Zeichen aus dem fokussierten editierbaren Feld. Keine Screenshots, keine Historie, keine Telemetrie und keine automatische Zwischenablage.")
+                    Text("Maximal 1.500 Zeichen aus dem fokussierten editierbaren Feld. Keine Screenshots, keine Telemetrie und keine automatische Zwischenablage. Aufnahmen und Transkripte verbleiben in der separat löschbaren lokalen Historie.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     LabeledContent("Standardpfad") {

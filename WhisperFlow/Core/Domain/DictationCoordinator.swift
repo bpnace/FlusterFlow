@@ -14,6 +14,7 @@ actor DictationCoordinator {
     private let localRewriter: (any TextRewriting)?
     private let insertion: any TextInserting
     private let fallbackText: (any EphemeralTextPreserving)?
+    private let recordingHistory: (any RecordingHistoryRecording)?
     private let prioritizedLexiconTerms: @Sendable (DictationLanguage) async -> [String]
 
     private var nextSessionRawValue: UInt64 = 0
@@ -35,6 +36,7 @@ actor DictationCoordinator {
         localRewriter: (any TextRewriting)? = nil,
         insertion: any TextInserting,
         fallbackText: (any EphemeralTextPreserving)? = nil,
+        recordingHistory: (any RecordingHistoryRecording)? = nil,
         prioritizedLexiconTerms: @escaping @Sendable (DictationLanguage) async -> [String] = { _ in [] }
     ) {
         self.contextProvider = contextProvider
@@ -45,6 +47,7 @@ actor DictationCoordinator {
         self.localRewriter = localRewriter
         self.insertion = insertion
         self.fallbackText = fallbackText
+        self.recordingHistory = recordingHistory
         self.prioritizedLexiconTerms = prioritizedLexiconTerms
     }
 
@@ -98,6 +101,11 @@ actor DictationCoordinator {
         }
 
         phase = .listening
+        do {
+            try await recordingHistory?.begin(sessionID: sessionID, language: language)
+        } catch {
+            return await failCurrent(sessionID, at: .audioStart)
+        }
         let contextProvider = contextProvider
         contextEnrichmentTasks[sessionID] = Task {
             do {
@@ -126,11 +134,16 @@ actor DictationCoordinator {
         guard isCurrent(sessionID, expected: .listening) else { return }
 
         incrementalRecognitionTasks[sessionID] = Task {
+            var recognizerAcceptsStreaming = true
             do {
                 try await lifecycle.startRecognitionSession(
                     hints: hints,
                     sessionID: sessionID
                 )
+            } catch {
+                recognizerAcceptsStreaming = false
+            }
+            do {
                 var frameOffset = 0
                 while !Task.isCancelled {
                     try await Task.sleep(for: .milliseconds(500))
@@ -141,14 +154,25 @@ actor DictationCoordinator {
                         continue
                     }
                     frameOffset = batch.nextFrameOffset
-                    let disposition = try await lifecycle.updateRecognitionSession(
-                        with: batch.chunk,
+                    try? await self.recordingHistory?.persistCheckpoint(
+                        batch.chunk,
                         sessionID: sessionID
                     )
-                    if disposition == .ignoredBatchRecognizer {
-                        return
+                    if recognizerAcceptsStreaming {
+                        do {
+                            let disposition = try await lifecycle.updateRecognitionSession(
+                                with: batch.chunk,
+                                sessionID: sessionID
+                            )
+                            if disposition == .ignoredBatchRecognizer {
+                                recognizerAcceptsStreaming = false
+                            } else {
+                                self.recordIncrementalRecognitionAudio(sessionID)
+                            }
+                        } catch {
+                            recognizerAcceptsStreaming = false
+                        }
                     }
-                    self.recordIncrementalRecognitionAudio(sessionID)
                 }
             } catch is CancellationError {
                 return
@@ -186,6 +210,11 @@ actor DictationCoordinator {
             return .ignoredStale(sessionID)
         }
         session?.audioInput = audio
+        do {
+            try await recordingHistory?.persistAudio(audio, sessionID: sessionID)
+        } catch {
+            return await failStop(sessionID, at: .audioFinalize)
+        }
 
         guard let capturedTargetContext = await resolvedContext(for: sessionID),
               let language = session?.language else {
@@ -220,6 +249,12 @@ actor DictationCoordinator {
         } catch let failure as any SpeechRecognitionFailureClassifying
             where failure.indicatesNoSpeech {
             return await finishAsNoSpeech(sessionID)
+        } catch {
+            return await failStop(sessionID, at: .recognition)
+        }
+
+        do {
+            try await recordingHistory?.persistTranscript(transcript, sessionID: sessionID)
         } catch {
             return await failStop(sessionID, at: .recognition)
         }
@@ -377,6 +412,7 @@ actor DictationCoordinator {
         phase = .cancelled
         _ = await insertion.requestCancellation(sessionID: sessionID)
         await fallbackText?.discardEphemeralText(sessionID: sessionID)
+        await recordingHistory?.discard(sessionID: sessionID)
         await releaseAudio(audio)
         await releaseSessionResources(sessionID)
 
@@ -429,6 +465,7 @@ actor DictationCoordinator {
         phase = .success
         session = nil
         await fallbackText?.discardEphemeralText(sessionID: sessionID)
+        await recordingHistory?.markFailed(sessionID: sessionID)
         await releaseSessionResources(sessionID)
         return .noSpeech(sessionID)
     }
@@ -447,6 +484,7 @@ actor DictationCoordinator {
         session = nil
         phase = .cancelled
         await fallbackText?.discardEphemeralText(sessionID: sessionID)
+        await recordingHistory?.discard(sessionID: sessionID)
         await releaseAudio(audio)
         await releaseSessionResources(sessionID)
     }
@@ -473,6 +511,7 @@ actor DictationCoordinator {
         let audio = takeOwnedAudio(for: sessionID)
         session = nil
         phase = .error(failure)
+        await recordingHistory?.markFailed(sessionID: sessionID)
         await releaseAudio(audio)
         await releaseSessionResources(sessionID)
         return .failed(sessionID, failure)

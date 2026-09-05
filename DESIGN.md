@@ -3,8 +3,8 @@
 ## Source of truth
 
 - Status: Active
-- Last refreshed: 2026-07-17
-- Primary product surfaces: macOS menu bar, first-run onboarding, nonactivating Flow Bar, settings window, native permission/download dialogs.
+- Last refreshed: 2026-09-05
+- Primary product surfaces: macOS menu bar, first-run onboarding, nonactivating Flow Bar, recording-history window, settings window, native permission/download dialogs.
 - Evidence reviewed:
   - `internal product specification`
   - `internal implementation plan`
@@ -30,17 +30,20 @@
 ## Product goals
 
 - Goals:
-  - Make the one-gesture push-to-talk flow understandable without opening the app.
+  - Make push-to-talk and the optional double-tap Handsfree flow understandable without opening the app.
   - Keep local-only readiness and current processing mode legible at every decision point.
   - Preserve focus in the target app and insert the final text without a secondary result surface.
+  - Preserve recordings and transcript versions locally until explicit deletion so failed or alternative local transcriptions remain recoverable.
   - Present permissions, model provisioning, and BYOK cloud controls without requiring developer knowledge.
 - Non-goals:
-  - A persistent editor, transcript history, chat interface, command palette, collaboration surface, or account dashboard.
+  - A general-purpose persistent text editor, chat interface, command palette, collaboration surface, or account dashboard. The bounded recording history is a recovery and local re-transcription surface, not a document workspace.
   - Pixel-identical imitation of Wispr Flow or a platform-neutral web-app aesthetic.
   - Decorative animation that competes with dictation status or affects target-field focus.
 - Success signals:
   - A new user can identify what is required for local dictation and what is optional.
   - During dictation, state and cancel availability are understandable at a glance and through VoiceOver.
+  - Handsfree state, elapsed time, and the 120-second automatic finalization boundary are explicit and do not rely on color alone.
+  - Every saved recording can be deleted explicitly; re-transcription creates a new local transcript version without replacing older versions.
   - Local-only versus cloud-enabled behavior is never communicated by color alone.
   - Successful dictation ends directly in the focused text field without clipboard or result-window steps.
 
@@ -50,17 +53,19 @@
 - User jobs:
   - Dictate a message, note, or draft without leaving the current text field.
   - Receive conservative punctuation and formatting without changing intended meaning.
+  - Recover a failed recording and compare locally generated transcript versions without re-recording.
   - Understand and control microphone, Accessibility, local model, context, and optional cloud boundaries.
   - Recover text safely when automatic insertion cannot be confirmed.
 - Key contexts of use: short frequent dictations, mixed DE/EN vocabulary, quiet or moderately noisy desktop use, multi-app workflows, offline/local-only operation, and occasional explicit BYOK enrichment.
 
 ## Information architecture
 
-- Primary navigation: the menu-bar item is the persistent entry point. It exposes readiness, active cancellation, settings, and quit; there is no permanent main window or Dock-centric navigation.
+- Primary navigation: the menu-bar item is the persistent entry point. It exposes readiness, active cancellation, recording history, settings, and quit; there is no Dock-centric navigation.
 - Core routes/screens:
   1. First-run onboarding: product promise, microphone, optional Accessibility, local model, readiness, finish.
-  2. Flow Bar: transient `priming`, `listening`, local/cloud processing, inserted, cancelled, and error states.
-  3. Settings: Diktat → Lokales Modell → Lokale Privatsphäre → Optionale OpenAI-Überarbeitung → Berechtigungen → System und Diagnose.
+  2. Flow Bar: transient `priming`, push-to-talk or Handsfree listening with elapsed time, local/cloud processing, inserted, cancelled, and error states.
+  3. Recording history: saved local recordings, processing status, transcript versions, local model selection, retry, and explicit single/all deletion.
+  4. Settings: Diktat → Aktivierung → Lokales Modell → Lokale Privatsphäre → Optionale OpenAI-Überarbeitung → Berechtigungen → System und Diagnose.
 - Content hierarchy: current state/action first; privacy consequence second; implementation detail only where it helps a decision. Required local setup appears before optional cloud configuration.
 
 ## Design principles
@@ -69,7 +74,8 @@
 - Principle 2 — Preserve the user’s focus: the Flow Bar never activates the app, stays compact, and provides only status plus cancellation while dictation is active.
 - Principle 3 — Fail safe and leave a path forward: denied permissions, unsupported targets, cloud errors, and unconfirmed insertion provide actionable recovery without losing the local candidate.
 - Principle 4 — Native restraint builds trust: prefer macOS controls, SF Symbols, materials, typography, focus behavior, and semantic colors over custom chrome.
-- Principle 5 — Disclosure precedes side effects: model downloads, cloud transfer, Keychain changes, pasteboard writes, and destructive discard actions require visible user intent.
+- Principle 5 — Disclosure precedes side effects: model downloads, cloud transfer, Keychain changes, pasteboard writes, recording deletion, and other destructive discard actions require visible user intent.
+- Principle 6 — History remains a local recovery boundary: saved audio and transcript versions persist until explicit deletion. History retry never invokes cloud enrichment, reads current target context, or inserts automatically.
 - Tradeoffs: clarity and safety outrank visual novelty; compactness outranks showing every pipeline stage; system-native adaptability outranks a rigid branded canvas; conservative copy may be longer where privacy consequences must be explicit.
 
 ## Visual language
@@ -96,9 +102,11 @@
 - New/changed components:
   - `AppIcon.appiconset` is the canonical application icon asset.
   - `RainbowWaveform` is the lightweight, decorative spectrum inside active Flow Bar states. Its geometry is deterministic, bounded, and independent of the audio callback.
+  - The recording-history window uses native lists and detail controls for transcript-version selection, local retry, and explicit deletion.
   - A future reusable `ModeDisclosure` is justified only if the same local/cloud disclosure pattern appears on at least three surfaces; until then, compose native `Label` and `Text` elements locally.
 - Variants and states:
-  - Flow Bar: priming, listening, local processing, cloud processing, inserted, cancelled, error; cancellation only during active work.
+  - Flow Bar: priming, push-to-talk listening, Handsfree listening, local processing, cloud processing, inserted, cancelled, error; cancellation only during active work. Listening exposes elapsed time and the 120-second boundary in text.
+  - Recording history: recording, ready, transcribing, completed, failed, interrupted, empty, and deletion-confirmation states.
   - Permission rows: not determined, authorized, denied, restricted; required/optional must be written as text.
   - Model controls: checking, missing, importing, downloading, ready, invalid, failed.
   - Cloud controls: no key, key stored, Keychain unavailable, disabled, enabled without context, enabled with separately consented context.
@@ -125,7 +133,7 @@
 
 - Loading: use a small native `ProgressView` with a concrete status such as checking, importing, or downloading. Do not use indefinite “magic” language.
 - Empty: missing model/key/permission states explain whether the capability is required, what remains available, and the single next action.
-- Error: use content-free, actionable categories. Preserve local text when processing or insertion fails; do not expose raw provider/system errors in user-facing copy.
+- Error: use content-free, actionable categories. Preserve the local recording and available transcript versions when processing or insertion fails; do not expose raw provider/system errors in user-facing copy.
 - Success: confirmation is brief and low-interruption (`Eingefügt`, model ready, key stored). Do not keep success panels visible longer than needed.
 - Disabled: keep controls visible when they teach dependency order; explain that cloud requires a stored key and cloud context requires cloud enablement.
 - Offline/slow network, if applicable: local dictation remains fully operable. Only explicit model provisioning and opted-in cloud enrichment show network progress; timeout/failure returns to the local candidate.
@@ -138,6 +146,7 @@
   - Use `API-Schlüssel` in user copy and `OpenAI` only where provider identity matters.
   - Distinguish `Rohtranskript`, `lokaler Kandidat`, and `fertiger Text` consistently.
 - Microcopy rules: lead with consequence, then scope, then technical detail. State defaults explicitly. Never imply that `store:false` equals Zero Data Retention, that Accessibility means whole-screen monitoring, or that a model download happens automatically.
+- History copy must state that audio and transcript versions remain on this Mac until explicit deletion. Retry copy must state that it is local-only and does not insert automatically.
 
 ## Implementation constraints
 

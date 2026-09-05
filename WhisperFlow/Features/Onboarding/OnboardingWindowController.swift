@@ -176,6 +176,9 @@ private struct OnboardingView: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle("Push-to-talk aktivieren", isOn: $store.pushToTalkEnabled)
+
+                    Toggle("Handsfree per Doppeltipp", isOn: $store.handsFreeEnabled)
+                        .disabled(!store.pushToTalkEnabled)
                         .font(.headline)
                     LabeledContent("Tastenkürzel") {
                         ShortcutRecorderField(

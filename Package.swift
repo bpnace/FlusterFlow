@@ -40,7 +40,8 @@ let package = Package(
                 .product(name: "MLXAudioSTT", package: "mlx-audio-swift"),
                 .product(name: "MLX", package: "mlx-swift")
             ],
-            path: "WhisperFlow"
+            path: "WhisperFlow",
+            exclude: ["WhisperFlow.entitlements"]
         ),
         .target(
             name: "TextTargetHarnessCore",

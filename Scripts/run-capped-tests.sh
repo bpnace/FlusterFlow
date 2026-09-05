@@ -6,7 +6,7 @@ PROJECT="$ROOT_DIR/WhisperFlow.xcodeproj"
 DEFAULT_PLAN="$ROOT_DIR/WhisperFlow.xctestplan"
 FULL_PLAN_NAME="WhisperFlow-Full"
 DEFAULT_PLAN_NAME="WhisperFlow"
-MAX_DEFAULT_TESTS=150
+MAX_DEFAULT_TESTS=180
 DESTINATION="${DESTINATION:-platform=macOS,arch=arm64}"
 
 mode="default"

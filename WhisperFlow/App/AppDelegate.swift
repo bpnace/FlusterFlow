@@ -86,6 +86,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(cancel)
         menu.addItem(.separator())
         menu.addItem(
+            withTitle: "Aufnahmen …",
+            action: #selector(openRecordingHistory),
+            keyEquivalent: "h"
+        ).target = self
+        menu.addItem(
             withTitle: "Einstellungen …",
             action: #selector(openSettings),
             keyEquivalent: ","
@@ -114,6 +119,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc
     private func openSettings() {
         presentSettings()
+    }
+
+    @objc
+    private func openRecordingHistory() {
+        environment.presentRecordingHistory()
     }
 
     func presentSettings() {

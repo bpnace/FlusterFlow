@@ -494,12 +494,16 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
             .cancelled,
             .error
         ] {
-            XCTAssertLessThanOrEqual(
-                FlowBarLayout.visibleWidth(for: presentation),
-                202
-            )
+            XCTAssertLessThanOrEqual(FlowBarLayout.visibleWidth(for: presentation), 262)
             XCTAssertEqual(FlowBarLayout.visibleHeight, 44)
         }
+    }
+
+    func testRecordingTimerFormatsElapsedAndRemainingTime() {
+        XCTAssertEqual(RecordingTimerText.elapsed(seconds: 0), "00:00")
+        XCTAssertEqual(RecordingTimerText.elapsed(seconds: 65), "01:05")
+        XCTAssertEqual(RecordingTimerText.remaining(seconds: 15), "noch 00:15")
+        XCTAssertEqual(RecordingTimerText.remaining(seconds: -1), "noch 00:00")
     }
 
     func testRainbowWaveformGeometryIsBoundedAndChangesOverTime() {

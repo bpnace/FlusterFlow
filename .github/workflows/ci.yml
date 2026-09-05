@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Build, tests, and local privacy gates
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify required tools
+        run: |
+          command -v rg
+          command -v jq
+
+      - name: Report toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Verify capped test plan
+        run: bash Scripts/run-capped-tests.sh --verify-only
+
+      - name: Build unsigned debug app
+        run: |
+          xcodebuild \
+            -project WhisperFlow.xcodeproj \
+            -scheme WhisperFlow \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Run capped app tests
+        run: bash Scripts/run-capped-tests.sh
+
+      - name: Run Swift package tests
+        run: swift test
+
+      - name: Verify static network boundary
+        run: bash Scripts/verify-local-network.sh
+
+      - name: Verify target harness
+        run: bash Scripts/verify-target-harness.sh
+
+      - name: Verify dynamic local privacy harness
+        run: bash Scripts/verify-local-privacy.sh
+
+      - name: Confirm signing gate is credential-gated
+        run: |
+          set +e
+          output="$(bash Scripts/verify-private-signing.sh --check-prerequisites 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -eq 77
+          printf '%s\n' "$output" | jq -e \
+            '.status == "blocked" and .reason == "identity_required"' >/dev/null
