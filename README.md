@@ -100,4 +100,4 @@ FluidAudio ist exakt auf `0.15.5` gepinnt. MLXAudioSTT verwendet `mlx-audio-swif
 
 ## Commit-Konvention
 
-Commits folgen dem Lore-Protokoll aus `repository contribution guidelines`: Die erste Zeile beschreibt die Absicht; optionale Trailer dokumentieren Constraints, verworfene Alternativen, Risiko und tatsächliche Verifikation.
+Die erste Commit-Zeile beschreibt die Absicht; optionale Trailer dokumentieren Constraints, verworfene Alternativen, Risiko und tatsächliche Verifikation.

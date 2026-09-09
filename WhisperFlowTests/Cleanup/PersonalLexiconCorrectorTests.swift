@@ -38,7 +38,7 @@ final class PersonalLexiconCorrectorTests: XCTestCase {
                 language: .automatic
             )
         ]
-        let source = "projectorbit https://example.invalid name@example.invalid `projectorbit` projectorbit_value"
+        let source = "projectorbit https://example.invalid name@example.invalid `project-orbit` project_orbit_value"
 
         XCTAssertEqual(
             PersonalLexiconCorrector().correct(
@@ -46,7 +46,7 @@ final class PersonalLexiconCorrectorTests: XCTestCase {
                 entries: entries,
                 language: .german
             ),
-            "PROJECT-ORBIT https://example.invalid name@example.invalid `projectorbit` projectorbit_value"
+            "PROJECT-ORBIT https://example.invalid name@example.invalid `project-orbit` project_orbit_value"
         )
     }
 

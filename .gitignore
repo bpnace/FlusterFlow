@@ -15,15 +15,49 @@ xcuserdata/
 
 # Local signing and secrets
 *.p12
+*.pfx
 *.cer
+*.crt
+*.der
+*.pem
+*.key
+*.keychain
+*.keychain-db
 *.mobileprovision
 *.env
 .env.*
+.envrc
+keychain-password
 
 # Local model artifacts
 Models/
 *.mlmodelc/
 
-# Local OMX runtime state
-.omx/state/
-.omx/tmux-hook.json
+# Local agent and editor runtime state
+.omx/
+.codex/
+.claude/
+.cursor/
+.idea/
+.vscode/
+
+# Local recordings and generated release/test artifacts
+*.wav
+*.aiff
+*.aif
+*.caf
+*.m4a
+*.mp3
+*.flac
+*.xcarchive/
+*.xcresult/
+*.app/
+*.dmg
+*.pkg
+*.zip
+*.tar
+*.tgz
+*.trace
+*.profraw
+*.profdata
+*.log

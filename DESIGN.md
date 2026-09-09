@@ -6,8 +6,6 @@
 - Last refreshed: 2026-09-05
 - Primary product surfaces: macOS menu bar, first-run onboarding, nonactivating Flow Bar, recording-history window, settings window, native permission/download dialogs.
 - Evidence reviewed:
-  - `internal product specification`
-  - `internal implementation plan`
   - `README.md`
   - `WhisperFlow/App/AppDelegate.swift`
   - `WhisperFlow/App/AppEnvironment.swift`
@@ -15,7 +13,7 @@
   - `WhisperFlow/Features/Onboarding/OnboardingWindowController.swift`
   - `WhisperFlow/Features/Settings/SettingsWindowController.swift`
   - `docs/privacy-data-flow.md` and `docs/threat-model.md`
-  - Owner-provided Flow Bar screenshot from 2026-07-17
+  - Flow Bar reference screenshot from 2026-07-17
   - Wispr Flow Help Center, “Navigating the Wispr Flow App” (category reference only)
 - Observed state: the app is a German-first, native SwiftUI/AppKit menu-bar utility with system typography, SF Symbols, adaptive system colors/materials, compact rounded surfaces, and explicit local/cloud privacy copy. The Flow Bar uses an original animated rainbow spectrum on a dark indigo glass capsule; no competitor assets are embedded.
 - Working assumptions: `FlusterFlow` is the private product name for V1; German is the primary interface language; public distribution and a full localization system remain outside the current release scope. Unknowns are recorded under Open questions instead of blocking implementation.

@@ -26,6 +26,9 @@ jobs:
         run: |
           command -v jq
 
+      - name: Verify repository hygiene
+        run: bash Scripts/verify-repository-hygiene.sh
+
       - name: Select Swift 6.2 toolchain
         run: |
           developer_dir=/Applications/Xcode_26.0.1.app/Contents/Developer
