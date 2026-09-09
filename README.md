@@ -1,80 +1,132 @@
-# FlusterFlow
+<p align="center">
+  <img src="Assets/README/flusterflow-header.png" alt="Abstrakte FlusterFlow-Wellenform, die sich in Text verwandelt" width="1400">
+</p>
 
-FlusterFlow ist eine private, native macOS-Diktier-App nach dem Bedienprinzip von Wispr Flow. `WhisperFlow` bleibt der interne Projekt- und Modulname.
+<h1 align="center">FlusterFlow</h1>
 
-## MVP-Stand
+<p align="center">
+  Private, lokale Spracheingabe für macOS – vom gesprochenen Wort direkt an die aktuelle Cursorposition.
+</p>
 
-Der MVP ist als Swift-6-Menüleisten-App für macOS 15 oder neuer integriert. Er umfasst:
+<p align="center">
+  <a href="https://github.com/bpnace/FlusterFlow/actions/workflows/ci.yml"><img src="https://github.com/bpnace/FlusterFlow/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/Swift-6.0%2B-F05138?logo=swift&amp;logoColor=white" alt="Swift 6.0 oder neuer">
+  <img src="https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&amp;logoColor=white" alt="macOS 15 oder neuer">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2D2D2D.svg" alt="MIT-Lizenz"></a>
+</p>
 
-- globales Push-to-talk mit konfigurierbarer Tastenkombination und nicht aktivierender Flow Bar;
-- optionales Handsfree-Diktat per Doppeltipp auf dasselbe Kürzel; der nächste Tastendruck beendet die Aufnahme;
-- echte Mikrofonwahl und eine auf 120 Sekunden begrenzte Aufnahme; beim Erreichen der Grenze wird der bis dahin erfasste Inhalt automatisch finalisiert statt verworfen;
-- lokale Aufnahmehistorie mit Audio, Status und versionierten Transkripten, einschließlich erneutem Transkribieren mit einem auswählbaren lokalen Modell;
-- frei wählbares lokales ASR: Parakeet TDT 0.6B v3 über FluidAudio `0.15.5`, Qwen3-ASR 0.6B 8-bit über MLXAudioSTT `0.1.3` sowie Whisper Large v3 und Large v3 Turbo über WhisperKit `1.0.0`;
-- Deutsch, Englisch und automatische Spracherkennung;
-- deterministisches lokales Cleanup sowie begrenzte Context Awareness;
-- strikte, bestätigte Einfügung an der unmittelbar vor dem Commit neu erfassten Cursorposition: native Felder über Accessibility-Mutationen, webbasierte Chatfelder über direkte Unicode-Tastaturereignisse und immer ohne automatische Zwischenablage;
-- optionale OpenAI-Überarbeitung mit eigenem API-Key aus dem macOS-Schlüsselbund;
-- ein gemeinsames App-Fenster mit Übersicht, Aufnahmen und allen Einstellungen; die Ersteinrichtung für Mikrofon, Bedienungshilfen und lokales Modell ist direkt in die Übersicht integriert;
-- inhaltsfreie Diagnosemetriken mit p50/p95-Export.
+FlusterFlow ist eine native macOS-Menüleisten-App für schnelles Diktieren in nativen Apps, Browsern und Electron-Anwendungen. Die Spracherkennung läuft standardmäßig vollständig lokal. Aufnahmen und Transkriptversionen bleiben wiederherstellbar auf dem eigenen Mac; eine textbasierte Cloud-Überarbeitung ist ein getrennt aktivierbarer BYOK-Pfad.
 
-## Datenschutzvertrag
+> **Status:** Version 0.4.0 ist derzeit als Release Candidate dokumentiert. Der unterstützte Daily-Driver-Weg ist ein lokal signierter Build aus dem Quellcode; Mikrofon, globaler Hotkey, Accessibility-Einfügung und TCC-Kontinuität bleiben manuelle Release-Gates.
 
-Die Standardeinstellung ist vollständig lokal. Nach einmaliger Modellbereitstellung benötigt der Diktatpfad kein Netzwerk, kein Konto und keine laufenden Kosten. Aufnahmen, Statusdaten und Transkriptversionen der Historie liegen ausschließlich im FlusterFlow-Ordner unter `~/Library/Application Support` und bleiben dort, bis sie einzeln oder vollständig ausdrücklich gelöscht werden. Die Historie erzeugt keine Telemetrie und nutzt die allgemeine Zwischenablage nicht automatisch.
+## Highlights
 
-Ein erneuter Transkriptionslauf aus der Historie verarbeitet das gespeicherte Audio ausschließlich mit dem ausgewählten lokalen Modell. Dabei werden weder Audio noch Text an OpenAI gesendet, kein Kontext aus der aktuell fokussierten App gelesen und kein Ergebnis automatisch in ein Textfeld eingefügt. Die optionale Cloud-Überarbeitung bleibt ein separater, bewusst aktivierter Pfad für ein neu ausgeführtes Diktat.
+- Globales Push-to-talk mit frei wählbarem Kürzel und nicht aktivierender Flow Bar
+- Optionaler Handsfree-Modus per Doppeltipp auf dasselbe Kürzel
+- Lokale Spracherkennung mit Parakeet, Qwen3-ASR oder Whisper
+- Deutsch, Englisch und automatische Spracherkennung
+- Lokale Aufnahmehistorie mit versionierten Transkripten und erneuter Transkription
+- Bestätigte Einfügung an der aktuellen Cursorposition ohne automatische Zwischenablage
+- Ein gemeinsames App-Fenster für Übersicht, Aufnahmen und Einstellungen
+- Optionale OpenAI-Überarbeitung mit eigenem API-Key aus dem macOS-Schlüsselbund
 
-Cloud-Überarbeitung ist standardmäßig aus. Sie wird nur genutzt, wenn sie in den Einstellungen aktiviert ist und ein eigener API-Key im Schlüsselbund liegt. Audio wird nie an OpenAI gesendet. Übertragen wird höchstens der fertige lokale Textkandidat; bis zu 1.500 Zeichen Kontext benötigen einen zweiten, unabhängigen Schalter. Die Anfrage ist text-only und stateless mit `store:false`, ohne Tools, Dateien, Background-Modus oder Konversation. `store:false` ist kein Zero-Data-Retention-Versprechen; Kosten und Aufbewahrung richten sich nach dem eigenen API-Projekt.
+## Voraussetzungen
+
+- macOS 15 oder neuer
+- Apple Silicon (`arm64`) für den dokumentierten Build- und Testpfad
+- Xcode mit Swift 6; die CI verwendet derzeit Xcode 26.0.1 und Swift 6.2
+- Mikrofon- und Bedienungshilfen-Berechtigung für den direkten Diktierpfad
+- Optional Apples Xcode-Metal-Toolchain für das Qwen-Modell
+
+Falls `xcrun metal --version` fehlschlägt, lässt sich die optionale Toolchain einmalig installieren:
+
+```bash
+xcodebuild -downloadComponent metalToolchain
+```
+
+## Schnellstart
+
+```bash
+git clone https://github.com/bpnace/FlusterFlow.git
+cd FlusterFlow
+bash Scripts/setup-private-signing.sh
+bash Scripts/build-install-private.sh
+```
+
+Der Setup-Schritt erstellt einen ausschließlich lokal verwendeten FlusterFlow-Schlüsselbund mit stabiler Code-Signing-Identität. Das zufällige Kennwort bleibt im geschützten Supportordner des aktuellen Benutzers. Der Installer legt die signierte App unter `~/Applications/FlusterFlow.app` ab und startet sie.
+
+Beim ersten Start:
+
+1. Mikrofon und Bedienungshilfen in der Übersicht erlauben.
+2. Ein gepinntes lokales Modell importieren oder dessen einmaligen Download ausdrücklich bestätigen.
+3. Unter „Diktat“ Sprache und Kürzel auswählen. Standard ist `⌃⌥Leertaste`.
+4. Optional Handsfree oder die getrennte Cloud-Überarbeitung aktivieren.
+
+Für den lokalen Betrieb sind weder Konto noch OpenAI-Key erforderlich. FlusterFlow lädt Modelle nicht unbemerkt herunter.
+
+### Warum eine fest installierte App?
+
+macOS bindet Bedienungshilfen-Berechtigungen an die Code-Identität der App. Builds aus wechselnden `DerivedData`- oder `/tmp`-Pfaden können diese Zuordnung nach einem Neubau verlieren. Der private Installer erzeugt deshalb eine stabil signierte Installation; Debug-Builds verwenden eine separate Bundle-ID.
+
+## Verwendung
+
+Setze den Cursor in ein editierbares Textfeld, halte das ausgewählte Kürzel gedrückt, sprich und lasse es wieder los. FlusterFlow transkribiert und bereinigt den Text und erfasst unmittelbar vor der Einfügung das aktuell fokussierte Ziel erneut.
+
+Ist Handsfree aktiviert, startet ein Doppeltipp auf das Kürzel die Aufnahme; ein weiterer Tastendruck beendet sie. Nach spätestens 120 Sekunden finalisiert FlusterFlow die bis dahin erfasste Aufnahme automatisch.
+
+Die Aufnahmehistorie speichert Audio, Status und Transkriptversionen lokal bis zur ausdrücklichen Löschung. Eine Aufnahme kann dort mit einem anderen lokalen Modell erneut transkribiert werden – ohne Cloud-Aufruf, Kontextlesung oder automatische Einfügung.
+
+## Datenschutz
+
+Local-first ist der Standard und eine technische Grenze, kein bloßes Versprechen.
+
+| Daten | Lokaler Standard | Optionale Cloud-Überarbeitung |
+| --- | --- | --- |
+| Audio | Aufnahme und Verarbeitung auf diesem Mac | Wird nie an OpenAI gesendet |
+| Lokaler Textkandidat | Lokal erkannt und bereinigt | Nur bei aktivierter Überarbeitung übertragen |
+| Cursor-Kontext | Keine Cloud-Übertragung | Bis zu 1.500 Zeichen mit zweitem, unabhängigem Opt-in |
+| API-Key | Nicht erforderlich | Im macOS-Schlüsselbund gespeichert |
+| History-Retry | Ausschließlich lokal | Ruft die Cloud nie auf |
+
+Cloud-Überarbeitung ist standardmäßig aus. Wenn sie aktiviert wird, bleibt die Anfrage text-only und stateless mit `store:false`, ohne Tools, Dateien, Background-Modus oder Konversation. `store:false` ist kein Zero-Data-Retention-Versprechen; Kosten und Aufbewahrung richten sich nach dem eigenen API-Projekt.
 
 Secure Fields und als geschützt markierte Accessibility-Ziele werden fail-closed behandelt: kein Kontext, keine Cloud und keine automatische Einfügung.
 
-Details stehen in [docs/privacy-data-flow.md](docs/privacy-data-flow.md) und [docs/threat-model.md](docs/threat-model.md).
+Mehr dazu: [Datenschutz-Datenfluss](docs/privacy-data-flow.md) · [Threat Model](docs/threat-model.md)
 
-## Erste Einrichtung
+## Lokale Sprachmodelle
 
-Der Qwen-Build benötigt Apples optionale Xcode-Metal-Toolchain. Falls `xcrun metal --version` noch fehlschlägt, wird sie einmalig mit `xcodebuild -downloadComponent metalToolchain` installiert.
+| Backend | Modell | Runtime |
+| --- | --- | --- |
+| Parakeet | Parakeet TDT 0.6B v3 | FluidAudio 0.15.5 |
+| Qwen | Qwen3-ASR 0.6B 8-bit | MLXAudioSTT 0.1.3 / MLX Swift 0.31.4 |
+| Whisper | Whisper Large v3 | WhisperKit 1.0.0 |
+| Whisper | Whisper Large v3 Turbo | WhisperKit 1.0.0 |
 
-1. Einmalig `bash Scripts/setup-private-signing.sh` ausführen. Dadurch entsteht ein ausschließlich lokal verwendeter FlusterFlow-Schlüsselbund mit stabiler Code-Signing-Identität. Sein zufälliges Kennwort liegt nur im geschützten FlusterFlow-Supportordner des aktuellen Benutzers.
-2. Für die normale private Einrichtung mit `bash Scripts/build-install-private.sh` eine signierte Release-App unter `~/Applications/FlusterFlow.app` installieren und starten. Für Release- oder TCC-Evidenz muss stattdessen die in `docs/verification-harnesses.md` dokumentierte verifizierte Artefaktkette verwendet werden; der Standard-Installer baut dafür ausdrücklich nicht dasselbe Artefakt.
-3. In der Übersicht Mikrofon und Bedienungshilfen ausdrücklich erlauben. Beides ist für den direkten Diktierpfad erforderlich.
-4. Das gepinnte lokale Modell in der Übersicht oder unter „Modelle“ importieren beziehungsweise den einmaligen Download bewusst bestätigen. Es erfolgt kein automatischer Modelldownload.
-5. Unter „Diktat“ Sprache und Push-to-talk-Kürzel auswählen. Standard ist `⌃⌥Leertaste`. Handsfree kann separat aktiviert werden und startet dann per Doppeltipp auf dieses Kürzel.
-6. Optional später unter „Cloud“ den eigenen OpenAI-API-Key hinterlegen und Cloud-Überarbeitung aktivieren. Für den lokalen Betrieb ist kein Key nötig.
+Alle Runtime-Versionen sind exakt gepinnt. Modellordner und Tokenizer sind zusätzlich an unveränderliche Revisionen, Dateigrößen und SHA-256-Prüfsummen gebunden. Modellgewichte werden nicht in diesem Repository gespeichert.
 
-Nicht aus wechselnden `DerivedData`- oder `/tmp`-Pfaden starten: Ad-hoc-/Test-Builds besitzen nach jedem Neubau eine andere Code-Identität und verlieren deshalb die Zuordnung zu bereits erteilten Bedienungshilfen. Für den privaten Daily Driver ist ausschließlich die fest installierte und lokal signierte App vorgesehen. Debug-Builds verwenden deshalb eine getrennte Bundle-ID, und der Installer hinterlässt keine weiteren `.app`-Kopien. Der Release-Build führt mit aktiviertem Hardened Runtime ausschließlich das von Apple für Audioaufnahme verlangte `com.apple.security.device.audio-input`-Entitlement.
+Details: [Model Supply Chain](docs/model-supply-chain.md) · [Third-Party Notices](THIRD_PARTY_NOTICES.md)
 
-Ein lokaler Import erwartet den Inhalt des jeweils gepinnten Modellordners. Jede Datei wird vor Installation anhand von Größe und SHA-256 geprüft. Die installierten Modelle liegen getrennt unter:
+## Entwicklung
 
-```text
-~/Library/Application Support/FlusterFlow/Models/parakeet-tdt-0.6b-v3
-~/Library/Application Support/FlusterFlow/Models/qwen3-asr-0.6b-8bit
-~/Library/Application Support/FlusterFlow/Models/whisper-large-v3-v20240930-626mb
-~/Library/Application Support/FlusterFlow/Models/whisper-large-v3-v20240930-turbo-632mb
-~/Library/Application Support/FlusterFlow/Models/whisper-large-v3-tokenizer
-```
-
-Modellherkunft, Revisionen und Updatevertrag sind in [docs/model-supply-chain.md](docs/model-supply-chain.md) dokumentiert.
-
-## Verwenden
-
-Den Cursor in ein editierbares Textfeld setzen, das ausgewählte Kürzel gedrückt halten, sprechen und loslassen. Wenn Handsfree aktiviert ist, startet ein Doppeltipp auf das Kürzel die freihändige Aufnahme; ein weiterer Tastendruck beendet sie. Nach spätestens 120 Sekunden finalisiert FlusterFlow die bis dahin erfasste Aufnahme automatisch. FlusterFlow erkennt, bereinigt und überarbeitet den Text und erfasst direkt vor der Einfügung das dann aktuell fokussierte Textfeld samt Auswahl oder Cursorposition neu. Der fertige Text ersetzt die Auswahl beziehungsweise erscheint an der Einfügemarke; die automatische Einfügung verwendet keine allgemeine Zwischenablage. Secure Fields und Nicht-Textfelder werden nicht beschrieben.
-
-Die lokale Historie bewahrt Aufnahme und Transkriptversionen bis zum ausdrücklichen Löschen auf. Von dort kann eine Aufnahme mit einem anderen lokalen Modell erneut transkribiert werden, ohne Cloud-Aufruf, Kontextlesung oder automatische Einfügung.
-
-## Bauen und testen
-
-Der normale Testlauf ist auf höchstens 180 produktnahe Tests begrenzt. Der
-vollständige Bestand bleibt als expliziter Extended-Lauf erhalten.
+Ein unsignierter Debug-Build:
 
 ```bash
 xcodebuild -project WhisperFlow.xcodeproj -scheme WhisperFlow \
   -configuration Debug -destination 'platform=macOS,arch=arm64' \
   CODE_SIGNING_ALLOWED=NO build
+```
 
+Der normale lokale Testlauf ist auf höchstens 180 produktnahe Tests begrenzt:
+
+```bash
 bash Scripts/run-capped-tests.sh
 bash Scripts/run-capped-tests.sh --verify-only
+```
 
-# Extended/Release, nicht der normale lokale Lauf:
+### Erweiterte Verifikation
+
+```bash
 bash Scripts/run-capped-tests.sh --full
 swift build
 swift test
@@ -84,20 +136,30 @@ bash Scripts/verify-target-harness.sh
 bash Scripts/verify-local-privacy.sh
 ```
 
-Die regulären automatisierten Tests verwenden weder einen echten OpenAI-Key noch einen Live-Request oder einen realen Modelldownload. Explizit aktivierbare lokale Smoke-Tests validieren und laden bereits installierte Whisper- und Qwen-Modelle, bleiben im normalen Testlauf aber übersprungen. Mikrofon-, Accessibility- und Ziel-App-Verhalten müssen für einen Daily-Driver-Build zusätzlich manuell auf dem Ziel-Mac geprüft werden.
+Die regulären Tests verwenden weder einen echten OpenAI-Key noch Live-Requests oder reale Modelldownloads. Mikrofon-, Hotkey-, TCC- und Ziel-App-Verhalten müssen für einen Release-Build zusätzlich manuell auf dem Ziel-Mac geprüft werden.
 
-Ein echtes lokales Qwen-Diktat lässt sich mit einer vorhandenen Audiodatei prüfen:
+Ein echtes lokales Qwen-Diktat mit vorhandener Audiodatei:
 
 ```bash
 bash Scripts/run-qwen-smoke-test.sh /pfad/zur/aufnahme.aiff
 ```
 
-Die isolierten AppKit-/WKWebView- und Local-only-Privacy-Harnesses sind in [docs/verification-harnesses.md](docs/verification-harnesses.md) beschrieben. Die echte Cross-Process-AX-Prüfung ist TCC-abhängig; Safari-, Chromium- und Electron-Ergebnisse werden über einen inhaltsfreien JSON-Vertrag manuell erfasst.
+Die isolierten AppKit-, WKWebView-, Accessibility- und Privacy-Harnesses sind unter [Verification Harnesses](docs/verification-harnesses.md) beschrieben.
 
-## Gepinnte Runtime
+## Dokumentation
 
-FluidAudio ist exakt auf `0.15.5` gepinnt. MLXAudioSTT verwendet `mlx-audio-swift` exakt in Version `0.1.3` und `mlx-swift` exakt in Version `0.31.4`; Xcode erzeugt die Metal-Ressource beim App-Build aus der ebenfalls gepinnten MLX-Revision. WhisperKit verwendet `argmax-oss-swift` exakt in Version `1.0.0`. Alle Modellordner und Tokenizer sind zusätzlich an unveränderliche Hugging-Face-Revisionen sowie vollständige Datei-Hashes gebunden. Details stehen in [docs/model-supply-chain.md](docs/model-supply-chain.md).
+- [Produktdefinition](PRODUCT.md)
+- [Datenschutz-Datenfluss](docs/privacy-data-flow.md)
+- [Threat Model](docs/threat-model.md)
+- [Model Supply Chain](docs/model-supply-chain.md)
+- [Verification Harnesses](docs/verification-harnesses.md)
+- [Architecture Decision Records](docs/adr)
+- [Release Notes 0.4.0](docs/release-v0.4.0.md)
 
-## Commit-Konvention
+## Beiträge
 
-Die erste Commit-Zeile beschreibt die Absicht; optionale Trailer dokumentieren Constraints, verworfene Alternativen, Risiko und tatsächliche Verifikation.
+Änderungen müssen die lokalen, fail-closed Datenschutz- und Einfügungsgrenzen erhalten und die jeweils betroffenen Prüfungen bestehen. Bitte halte Pull Requests fokussiert, dokumentiere neue Daten- oder Netzwerkpfade ausdrücklich und füge Regressionstests für geändertes Verhalten hinzu.
+
+## Lizenz
+
+Der FlusterFlow-Quellcode steht unter der [MIT-Lizenz](LICENSE). Abhängigkeiten und Modellartefakte unterliegen ihren jeweiligen Lizenzen und Bedingungen; maßgeblich sind die [Third-Party Notices](THIRD_PARTY_NOTICES.md) und die verlinkten Upstream-Lizenztexte.
