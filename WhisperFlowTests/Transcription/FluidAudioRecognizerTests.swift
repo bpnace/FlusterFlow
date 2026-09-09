@@ -130,10 +130,204 @@ final class FluidAudioRecognizerTests: XCTestCase, @unchecked Sendable {
         try await runtime.prepare(modelDirectory: try await store.validatedDirectory())
     }
 
+    func testRuntimeCancellationWaitsForTrackedTaskTermination() async {
+        let runtime = OfflineFluidAudioRuntime()
+        let sessionID = DictationSessionID(rawValue: 7_001)
+        let started = AsyncTestGate()
+        let cancellationObserved = AsyncTestGate()
+        let allowTermination = AsyncTestGate()
+        let cancellationReturned = AsyncTestFlag()
+
+        let transcription = Task {
+            try await runtime.runTrackedTranscription(sessionID: sessionID) {
+                try await withTaskCancellationHandler {
+                    await started.open()
+                    await allowTermination.wait()
+                    try Task.checkCancellation()
+                    return "unreachable"
+                } onCancel: {
+                    Task { await cancellationObserved.open() }
+                }
+            }
+        }
+        await started.wait()
+
+        let cancellation = Task {
+            await runtime.cancel(sessionID: sessionID)
+            await cancellationReturned.set()
+        }
+        await cancellationObserved.wait()
+
+        let returnedBeforeTermination = await cancellationReturned.value
+        XCTAssertFalse(returnedBeforeTermination)
+        await allowTermination.open()
+        await cancellation.value
+        let returnedAfterTermination = await cancellationReturned.value
+        XCTAssertTrue(returnedAfterTermination)
+        _ = try? await transcription.value
+    }
+
+    func testRouterCancellationDuringPrepareKeepsLeaseUntilOperationTerminates() async throws {
+        let audioStore = AudioBufferStore()
+        let input = await audioStore.store(AudioSamples(values: [0.1, -0.1]))
+        let runtime = BlockingPrepareFluidRuntime()
+        let recognizer = FluidAudioRecognizer(
+            sampleAccess: audioStore,
+            modelStore: StubModelStore(result: .success(URL(fileURLWithPath: "/private/model"))),
+            runtime: runtime
+        )
+        let router = SessionModelSpeechRecognizer(recognizers: [.parakeetV3Int8: recognizer])
+        let firstSession = DictationSessionID(rawValue: 7_011)
+        let secondSession = DictationSessionID(rawValue: 7_012)
+        await router.register(.parakeetV3Int8, for: firstSession)
+        await router.register(.parakeetV3Int8, for: secondSession)
+
+        let transcription = Task {
+            try await router.transcribe(
+                input,
+                hints: RecognitionHints(language: .automatic, terms: []),
+                sessionID: firstSession
+            )
+        }
+        await runtime.waitUntilPrepareStarts()
+
+        let cancellationReturned = AsyncTestFlag()
+        let cancellation = Task {
+            await router.cancel(sessionID: firstSession)
+            await cancellationReturned.set()
+        }
+        await runtime.waitUntilCancellationIsObserved()
+
+        do {
+            try await router.acquireExclusiveAccess(
+                for: secondSession,
+                purpose: .historyRetranscription
+            )
+            XCTFail("The lease must stay held while cancelled preparation is still terminating")
+        } catch {
+            XCTAssertEqual(
+                error as? SessionModelSpeechRecognizerError,
+                .recognizerBusy(activePurpose: .liveDictation)
+            )
+        }
+        do {
+            _ = try await router.transcribe(
+                input,
+                hints: RecognitionHints(language: .automatic, terms: []),
+                sessionID: secondSession
+            )
+            XCTFail("A second session must not execute while preparation is still terminating")
+        } catch {
+            XCTAssertEqual(
+                error as? SessionModelSpeechRecognizerError,
+                .recognizerBusy(activePurpose: .liveDictation)
+            )
+        }
+        let countWhileTerminating = await runtime.transcriptionCount
+        XCTAssertEqual(countWhileTerminating, 0)
+        let returnedBeforeTermination = await cancellationReturned.value
+        XCTAssertFalse(returnedBeforeTermination)
+
+        await runtime.allowPrepareToTerminate()
+        await cancellation.value
+        _ = try? await transcription.value
+
+        try await router.acquireExclusiveAccess(
+            for: secondSession,
+            purpose: .historyRetranscription
+        )
+        let secondTranscript = try await router.transcribe(
+            input,
+            hints: RecognitionHints(language: .automatic, terms: []),
+            sessionID: secondSession
+        )
+        await router.releaseExclusiveAccess(for: secondSession)
+        let transcriptionCount = await runtime.transcriptionCount
+        XCTAssertEqual(secondTranscript.text, "unexpected")
+        XCTAssertEqual(transcriptionCount, 1)
+        await audioStore.release(input)
+    }
+
     private func sha256(_ data: Data) -> ModelSHA256 {
         let digest = SHA256.hash(data: data)
         let value = digest.map { String(format: "%02x", $0) }.joined()
         return ModelSHA256(value)!
+    }
+}
+
+private actor AsyncTestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
+private actor AsyncTestFlag {
+    private(set) var value = false
+
+    func set() {
+        value = true
+    }
+}
+
+private actor BlockingPrepareFluidRuntime: FluidAudioRuntimeServing {
+    private let prepareStarted = AsyncTestGate()
+    private let cancellationObserved = AsyncTestGate()
+    private let allowTermination = AsyncTestGate()
+    private(set) var transcriptionCount = 0
+
+    func prepare(modelDirectory: URL) async throws {
+        _ = modelDirectory
+        try await withTaskCancellationHandler {
+            await prepareStarted.open()
+            await allowTermination.wait()
+            try Task.checkCancellation()
+        } onCancel: {
+            Task { await cancellationObserved.open() }
+        }
+    }
+
+    func transcribe(
+        samples: [Float],
+        language: FluidAudioLanguageMode,
+        terms: [String],
+        sessionID: DictationSessionID
+    ) -> String {
+        _ = samples
+        _ = language
+        _ = terms
+        _ = sessionID
+        transcriptionCount += 1
+        return "unexpected"
+    }
+
+    func cancel(sessionID: DictationSessionID) {
+        _ = sessionID
+    }
+
+    func waitUntilPrepareStarts() async {
+        await prepareStarted.wait()
+    }
+
+    func waitUntilCancellationIsObserved() async {
+        await cancellationObserved.wait()
+    }
+
+    func allowPrepareToTerminate() async {
+        await allowTermination.open()
     }
 }
 

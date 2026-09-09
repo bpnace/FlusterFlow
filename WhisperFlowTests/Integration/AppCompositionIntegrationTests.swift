@@ -309,6 +309,11 @@ final class AppCompositionIntegrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(composition.contains("ModelProvisioningService"))
     }
 
+    func testOnboardingDisclosesLocalRecordingHistory() throws {
+        XCTAssertTrue(OnboardingPrivacyCopy.localHistory.contains("Lokal löschbare Aufnahmehistorie"))
+        XCTAssertFalse(OnboardingPrivacyCopy.localHistory.contains("Keine Aufnahmehistorie"))
+    }
+
     func testProtectedContentIsCheckedAtCaptureAndRevalidatedBeforeInsertion() throws {
         let source = try TestResourceLoader.string(
             "WhisperFlow/Core/Accessibility/AccessibilityTargetRegistry.swift"
@@ -370,9 +375,17 @@ final class AppCompositionIntegrationTests: XCTestCase, @unchecked Sendable {
             function.range(of: "outcome = await coordinator.cancel")
         )
         let beforeCoordinatorOutcome = function[..<coordinatorAwait.lowerBound]
+        let normalizedFunction = function
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
 
         XCTAssertFalse(beforeCoordinatorOutcome.contains("showFlow(.cancelled)"))
-        XCTAssertTrue(function.contains("applyCancellationOutcome(outcome)"))
+        XCTAssertTrue(
+            normalizedFunction.contains(
+                "applyCancellationOutcome( outcome, "
+                    + "cancelledBeforeSessionStart: cancelledBeforeSessionStart )"
+            )
+        )
     }
 
     func testUnifiedLogDiagnosticsContainNoSessionIdentifierSurface() throws {

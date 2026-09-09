@@ -35,7 +35,7 @@ Details stehen in [docs/privacy-data-flow.md](docs/privacy-data-flow.md) und [do
 Der Qwen-Build benötigt Apples optionale Xcode-Metal-Toolchain. Falls `xcrun metal --version` noch fehlschlägt, wird sie einmalig mit `xcodebuild -downloadComponent metalToolchain` installiert.
 
 1. Einmalig `bash Scripts/setup-private-signing.sh` ausführen. Dadurch entsteht ein ausschließlich lokal verwendeter FlusterFlow-Schlüsselbund mit stabiler Code-Signing-Identität. Sein zufälliges Kennwort liegt nur im geschützten FlusterFlow-Supportordner des aktuellen Benutzers.
-2. Mit `bash Scripts/build-install-private.sh` eine signierte Release-App unter `~/Applications/FlusterFlow.app` installieren und starten.
+2. Für die normale private Einrichtung mit `bash Scripts/build-install-private.sh` eine signierte Release-App unter `~/Applications/FlusterFlow.app` installieren und starten. Für Release- oder TCC-Evidenz muss stattdessen die in `docs/verification-harnesses.md` dokumentierte verifizierte Artefaktkette verwendet werden; der Standard-Installer baut dafür ausdrücklich nicht dasselbe Artefakt.
 3. Im Onboarding Mikrofon und Bedienungshilfen ausdrücklich erlauben. Beides ist für den direkten Diktierpfad erforderlich.
 4. Das gepinnte lokale Modell in den Einstellungen importieren oder den einmaligen Download bewusst bestätigen. Es erfolgt kein automatischer Modelldownload.
 5. Sprache, Mikrofon und Push-to-talk-Kürzel auswählen. Standard ist `⌃⌥Leertaste`. Handsfree kann separat aktiviert werden und startet dann per Doppeltipp auf dieses Kürzel.
@@ -78,6 +78,7 @@ bash Scripts/run-capped-tests.sh --verify-only
 bash Scripts/run-capped-tests.sh --full
 swift build
 swift test
+bash Scripts/test-verified-artifact-chain.sh
 bash Scripts/verify-local-network.sh
 bash Scripts/verify-target-harness.sh
 bash Scripts/verify-local-privacy.sh

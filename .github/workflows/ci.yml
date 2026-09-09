@@ -56,6 +56,9 @@ jobs:
       - name: Run Swift package tests
         run: swift test
 
+      - name: Verify signed artifact handoff contracts
+        run: bash Scripts/test-verified-artifact-chain.sh
+
       - name: Verify static network boundary
         run: bash Scripts/verify-local-network.sh
 

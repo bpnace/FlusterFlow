@@ -305,7 +305,10 @@ actor AdaptiveWhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
             )
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as ProductASRDeadlineError {
+            throw error
         } catch {
+            try ProductASRDeadlineContext.requireRemainingBudget()
             let largeResult = try await large.transcribe(
                 audio,
                 hints: hints,
@@ -333,6 +336,7 @@ actor AdaptiveWhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
             )
         }
 
+        try ProductASRDeadlineContext.requireRemainingBudget()
         let largeResult: RawTranscript
         do {
             largeResult = try await large.transcribe(

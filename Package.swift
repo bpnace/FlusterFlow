@@ -75,8 +75,7 @@ let package = Package(
             dependencies: ["WhisperFlow"],
             path: "WhisperFlowTests",
             resources: [
-                .copy("../Tests/Fixtures"),
-                .copy("../WhisperFlow")
+                .copy("../Tests/Fixtures")
             ]
         ),
         .testTarget(

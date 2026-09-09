@@ -1,34 +1,68 @@
 import AppKit
 import SwiftUI
 
+protocol RecordingHistoryModelReadinessProviding: Sendable {
+    func isReady(_ choice: LocalModelChoice) async -> Bool
+}
+
+struct RecordingHistoryModelReadinessProvider: RecordingHistoryModelReadinessProviding {
+    private let readiness: @Sendable (LocalModelChoice) async -> Bool
+
+    init(readiness: @escaping @Sendable (LocalModelChoice) async -> Bool) {
+        self.readiness = readiness
+    }
+
+    func isReady(_ choice: LocalModelChoice) async -> Bool {
+        await readiness(choice)
+    }
+
+    static let allReady = Self { _ in true }
+}
+
 @MainActor
 final class RecordingHistoryViewModel: ObservableObject {
+    private static var nextHistorySessionRawValue: UInt64 = 0
+
     @Published private(set) var entries: [RecordingHistoryEntry] = []
+    @Published private(set) var hasManagedArtifacts = false
     @Published var selectedID: UUID?
     @Published var selectedModel: LocalModelChoice = .adaptive
     @Published private(set) var isWorking = false
     @Published private(set) var errorMessage: String?
+    @Published private(set) var readyModels: Set<LocalModelChoice> = []
 
     private let store: RecordingHistoryStore
     private let audioSamples: AudioBufferStore
     private let recognizer: SessionModelSpeechRecognizer
+    private let modelReadiness: any RecordingHistoryModelReadinessProviding
+    private var retranscriptionsNeedingStateRepair: Set<UUID> = []
 
     init(
         store: RecordingHistoryStore,
         audioSamples: AudioBufferStore,
-        recognizer: SessionModelSpeechRecognizer
+        recognizer: SessionModelSpeechRecognizer,
+        modelReadiness: any RecordingHistoryModelReadinessProviding = RecordingHistoryModelReadinessProvider.allReady
     ) {
         self.store = store
         self.audioSamples = audioSamples
         self.recognizer = recognizer
+        self.modelReadiness = modelReadiness
     }
 
     var selectedEntry: RecordingHistoryEntry? {
         entries.first { $0.id == selectedID }
     }
 
+    var canDeleteAll: Bool {
+        hasManagedArtifacts
+            && !entries.contains {
+                $0.state == .recording || $0.state == .transcribing
+            }
+            && !isWorking
+    }
+
     func reload() {
-        Task { await loadEntries() }
+        Task { await reloadEntries() }
     }
 
     func retranscribeSelected() {
@@ -36,64 +70,126 @@ final class RecordingHistoryViewModel: ObservableObject {
         let modelChoice = selectedModel
         isWorking = true
         errorMessage = nil
-        Task {
-            let sessionID = Self.historySessionID()
-            var input: AudioInput?
-            do {
-                _ = try await store.beginRetranscription(entry.id)
-                let samples = try await store.loadAudio(for: entry.id)
-                let storedInput = await audioSamples.store(samples)
-                input = storedInput
-                await recognizer.register(modelChoice, for: sessionID)
-                let transcript = try await recognizer.transcribe(
-                    storedInput,
-                    hints: RecognitionHints(
-                        language: entry.language,
-                        terms: [],
-                        prioritizedLexiconTerms: []
-                    ),
-                    sessionID: sessionID
-                )
-                try await store.appendTranscript(
-                    TranscriptVersion(
-                        backend: transcript.backend?.rawValue ?? modelChoice.rawValue,
-                        language: transcript.language,
-                        text: transcript.text
-                    ),
-                    to: entry.id
-                )
-            } catch {
-                try? await store.mark(entry.id, state: .failed)
+        Task { await performRetranscription(of: entry, modelChoice: modelChoice) }
+    }
+
+    func reloadEntries() async {
+        errorMessage = nil
+        await repairFailedRetranscriptionStates()
+        await store.retryLaunchRecovery()
+        await refreshModelReadiness()
+        await loadEntries()
+    }
+
+    func isModelReady(_ choice: LocalModelChoice) -> Bool {
+        readyModels.contains(choice)
+    }
+
+    func performSelectedRetranscription() async {
+        guard let entry = selectedEntry, entry.hasAudio, !isWorking else { return }
+        let modelChoice = selectedModel
+        isWorking = true
+        errorMessage = nil
+        await performRetranscription(of: entry, modelChoice: modelChoice)
+    }
+
+    private func performRetranscription(
+        of entry: RecordingHistoryEntry,
+        modelChoice: LocalModelChoice
+    ) async {
+        let sessionID = Self.historySessionID()
+        var input: AudioInput?
+        var didBeginRetranscription = false
+        do {
+            guard await modelReadiness.isReady(modelChoice) else {
+                readyModels.remove(modelChoice)
+                errorMessage = "Das ausgewählte lokale Modell ist nicht verfügbar."
+                isWorking = false
+                return
+            }
+            try await recognizer.acquireExclusiveAccess(
+                for: sessionID,
+                purpose: .historyRetranscription
+            )
+            _ = try await store.beginRetranscription(entry.id)
+            didBeginRetranscription = true
+            let samples = try await store.loadAudio(for: entry.id)
+            let storedInput = await audioSamples.store(samples)
+            input = storedInput
+            await recognizer.register(modelChoice, for: sessionID)
+            let transcript = try await recognizer.transcribe(
+                storedInput,
+                hints: RecognitionHints(
+                    language: entry.language,
+                    terms: [],
+                    prioritizedLexiconTerms: []
+                ),
+                sessionID: sessionID
+            )
+            try await store.appendTranscript(
+                TranscriptVersion(
+                    backend: transcript.backend?.rawValue ?? modelChoice.rawValue,
+                    language: transcript.language,
+                    text: transcript.text
+                ),
+                to: entry.id
+            )
+        } catch let error as SessionModelSpeechRecognizerError {
+            if didBeginRetranscription {
+                await markRetranscriptionFailed(entry.id)
+            }
+            if case .recognizerBusy = error {
+                errorMessage = "Die lokale Spracherkennung ist gerade beschäftigt. Bitte versuche es nach dem aktuellen Diktat erneut."
+            } else if !retranscriptionsNeedingStateRepair.contains(entry.id) {
                 errorMessage = "Die lokale Transkription ist fehlgeschlagen. Die Aufnahme bleibt erhalten."
             }
-            if let input { await audioSamples.release(input) }
-            await recognizer.cancel(sessionID: sessionID)
-            await loadEntries()
-            isWorking = false
+        } catch {
+            if didBeginRetranscription {
+                await markRetranscriptionFailed(entry.id)
+            }
+            if !retranscriptionsNeedingStateRepair.contains(entry.id) {
+                errorMessage = "Die lokale Transkription ist fehlgeschlagen. Die Aufnahme bleibt erhalten."
+            }
         }
+        if let input { await audioSamples.release(input) }
+        await recognizer.cancel(sessionID: sessionID)
+        await loadEntries()
+        isWorking = false
     }
 
     func deleteSelected() {
         guard let id = selectedID, !isWorking else { return }
+        isWorking = true
+        errorMessage = nil
         Task {
+            defer { isWorking = false }
             do {
                 try await store.delete(id)
                 selectedID = nil
                 await loadEntries()
             } catch {
-                errorMessage = "Die Aufnahme konnte nicht gelöscht werden."
+                await loadEntries()
+                if entries.contains(where: { $0.id == id && !$0.hasAudio }) {
+                    errorMessage = "Das Audio wurde gelöscht, aber der Historieneintrag konnte nicht entfernt werden. Du kannst das Löschen erneut versuchen."
+                } else {
+                    errorMessage = "Die Aufnahme konnte nicht gelöscht werden."
+                }
             }
         }
     }
 
     func deleteAll() {
         guard !isWorking else { return }
+        isWorking = true
+        errorMessage = nil
         Task {
+            defer { isWorking = false }
             do {
                 try await store.deleteAll()
                 selectedID = nil
                 await loadEntries()
             } catch {
+                await loadEntries()
                 errorMessage = "Die Aufnahmehistorie konnte nicht vollständig gelöscht werden."
             }
         }
@@ -102,6 +198,7 @@ final class RecordingHistoryViewModel: ObservableObject {
     private func loadEntries() async {
         do {
             entries = try await store.list()
+            hasManagedArtifacts = try await store.hasManagedArtifacts()
             if await store.hasRecoveryWarning() {
                 errorMessage = "Mindestens ein Historieneintrag ist beschädigt oder konnte nicht vollständig wiederhergestellt werden. Gültige Aufnahmen bleiben sichtbar und können gelöscht werden."
             }
@@ -110,14 +207,49 @@ final class RecordingHistoryViewModel: ObservableObject {
             }
         } catch {
             entries = []
+            hasManagedArtifacts = false
             selectedID = nil
             errorMessage = "Die lokale Aufnahmehistorie konnte nicht gelesen werden."
         }
     }
 
+    private func refreshModelReadiness() async {
+        var ready: Set<LocalModelChoice> = []
+        for choice in LocalModelChoice.allCases {
+            if await modelReadiness.isReady(choice) {
+                ready.insert(choice)
+            }
+        }
+        readyModels = ready
+        if !ready.contains(selectedModel), let fallback = LocalModelChoice.allCases.first(where: ready.contains) {
+            selectedModel = fallback
+        }
+    }
+
+    private func markRetranscriptionFailed(_ id: UUID) async {
+        do {
+            try await store.mark(id, state: .failed)
+            retranscriptionsNeedingStateRepair.remove(id)
+        } catch {
+            retranscriptionsNeedingStateRepair.insert(id)
+            errorMessage = "Die Transkription ist fehlgeschlagen und ihr Status konnte nicht gespeichert werden. Stelle den Speicherzugriff wieder her und klicke auf Aktualisieren."
+        }
+    }
+
+    private func repairFailedRetranscriptionStates() async {
+        for id in retranscriptionsNeedingStateRepair {
+            do {
+                try await store.mark(id, state: .failed)
+                retranscriptionsNeedingStateRepair.remove(id)
+            } catch {
+                errorMessage = "Der fehlgeschlagene Transkriptionsstatus konnte noch nicht gespeichert werden."
+            }
+        }
+    }
+
     private static func historySessionID() -> DictationSessionID {
-        let micros = UInt64(Date().timeIntervalSinceReferenceDate * 1_000_000)
-        return DictationSessionID(rawValue: micros | (1 << 63))
+        nextHistorySessionRawValue &+= 1
+        return DictationSessionID(rawValue: nextHistorySessionRawValue | (1 << 63))
     }
 }
 
@@ -128,12 +260,14 @@ final class RecordingHistoryWindowController: NSWindowController {
     init(
         store: RecordingHistoryStore,
         audioSamples: AudioBufferStore,
-        recognizer: SessionModelSpeechRecognizer
+        recognizer: SessionModelSpeechRecognizer,
+        modelReadiness: any RecordingHistoryModelReadinessProviding
     ) {
         viewModel = RecordingHistoryViewModel(
             store: store,
             audioSamples: audioSamples,
-            recognizer: recognizer
+            recognizer: recognizer,
+            modelReadiness: modelReadiness
         )
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
@@ -180,22 +314,25 @@ private struct RecordingHistoryView: View {
             if let entry = model.selectedEntry {
                 detail(entry)
             } else {
-                ContentUnavailableView(
-                    "Keine Aufnahme ausgewählt",
-                    systemImage: "waveform"
-                )
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        "Keine Aufnahme ausgewählt",
+                        systemImage: "waveform"
+                    )
+                    if let error = model.errorMessage {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal)
+                    }
+                }
             }
         }
         .frame(minWidth: 720, minHeight: 480)
         .toolbar {
+            Button("Aktualisieren", systemImage: "arrow.clockwise") { model.reload() }
+                .disabled(model.isWorking)
             Button("Alle löschen", role: .destructive) { confirmsDeleteAll = true }
-                .disabled(
-                    model.entries.isEmpty
-                        || model.entries.contains {
-                            $0.state == .recording || $0.state == .transcribing
-                        }
-                        || model.isWorking
-                )
+                .disabled(!model.canDeleteAll)
         }
         .confirmationDialog(
             "Gesamte lokale Aufnahmehistorie löschen?",
@@ -238,14 +375,16 @@ private struct RecordingHistoryView: View {
                 Picker("Lokales Modell", selection: $model.selectedModel) {
                     ForEach(LocalModelChoice.allCases) { choice in
                         Text(choice.title).tag(choice)
+                            .disabled(!model.isModelReady(choice))
                     }
                 }
-                .disabled(model.isWorking)
+                .disabled(model.isWorking || model.readyModels.isEmpty)
                 Button("Neu transkribieren") { model.retranscribeSelected() }
                     .disabled(
                         !entry.hasAudio
                             || entry.state == .recording
                             || entry.state == .transcribing
+                            || !model.isModelReady(model.selectedModel)
                             || model.isWorking
                     )
             }
@@ -260,7 +399,11 @@ private struct RecordingHistoryView: View {
                 ContentUnavailableView(
                     "Noch kein Transkript",
                     systemImage: "text.badge.xmark",
-                    description: Text("Die Aufnahme bleibt für einen erneuten lokalen Versuch erhalten.")
+                    description: Text(
+                        entry.hasAudio
+                            ? "Die Aufnahme bleibt für einen erneuten lokalen Versuch erhalten."
+                            : "Die Audiodatei ist nicht mehr vorhanden. Der Historieneintrag kann noch gelöscht werden."
+                    )
                 )
             } else {
                 List(entry.transcripts.reversed(), id: \.version) { version in

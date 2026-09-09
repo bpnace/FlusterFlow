@@ -21,7 +21,8 @@ struct DictationActivationReducer: Sendable {
     private(set) var mode: DictationActivationMode
     private(set) var isPushToTalkPressed = false
     private(set) var isHandsFreeActive = false
-    private var lastPushToTalkRelease: TimeInterval?
+    private(set) var secondTapDeadline: TimeInterval?
+    private var pushToTalkPressedAt: TimeInterval?
     private var ignoreNextRelease = false
 
     init(mode: DictationActivationMode) {
@@ -32,8 +33,16 @@ struct DictationActivationReducer: Sendable {
         if let mode { self.mode = mode }
         isPushToTalkPressed = false
         isHandsFreeActive = false
-        lastPushToTalkRelease = nil
+        secondTapDeadline = nil
+        pushToTalkPressedAt = nil
         ignoreNextRelease = false
+    }
+
+    func isAwaitingSecondTap(at time: TimeInterval) -> Bool {
+        guard mode == .doubleTap,
+              let secondTapDeadline else { return false }
+        let windowStart = secondTapDeadline - Self.doubleTapThreshold
+        return time >= windowStart && time <= secondTapDeadline
     }
 
     mutating func consume(
@@ -46,29 +55,41 @@ struct DictationActivationReducer: Sendable {
             if isHandsFreeActive {
                 isHandsFreeActive = false
                 isPushToTalkPressed = true
+                pushToTalkPressedAt = time
                 ignoreNextRelease = true
-                lastPushToTalkRelease = nil
+                secondTapDeadline = nil
                 return .endHandsFree
             }
             isPushToTalkPressed = true
-            if mode == .doubleTap,
-               let lastPushToTalkRelease,
-               time >= lastPushToTalkRelease,
-               time - lastPushToTalkRelease <= Self.doubleTapThreshold {
+            pushToTalkPressedAt = time
+            if isAwaitingSecondTap(at: time) {
                 isPushToTalkPressed = false
+                pushToTalkPressedAt = nil
                 isHandsFreeActive = true
+                secondTapDeadline = nil
                 return .beginHandsFree
             }
+            secondTapDeadline = nil
             return .beginPushToTalk
 
         case .released:
             guard isPushToTalkPressed else { return .none }
             isPushToTalkPressed = false
+            let pressedAt = pushToTalkPressedAt
+            pushToTalkPressedAt = nil
             if ignoreNextRelease {
                 ignoreNextRelease = false
+                secondTapDeadline = nil
                 return .none
             }
-            lastPushToTalkRelease = time
+            if mode == .doubleTap,
+               let pressedAt,
+               time >= pressedAt,
+               time - pressedAt <= Self.doubleTapThreshold {
+                secondTapDeadline = time + Self.doubleTapThreshold
+            } else {
+                secondTapDeadline = nil
+            }
             return .endPushToTalk
         }
     }

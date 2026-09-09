@@ -132,12 +132,19 @@ Ohne explizite Identity meldet er maschinenlesbar `status: "blocked"`, `reason: 
 FLUSTERFLOW_CODE_SIGN_IDENTITY='<40-hex-fingerprint>' \
   bash Scripts/verify-private-signing.sh --check-prerequisites
 
+VERIFIED_ROOT="$(mktemp -d /tmp/flusterflow-verified-artifact.XXXXXX)"
 bash Scripts/verify-private-signing.sh \
-  --identity '<40-hex-fingerprint>'
+  --identity '<40-hex-fingerprint>' \
+  --export-app "$VERIFIED_ROOT/FlusterFlow.app"
+
+# Den cdHash aus der inhaltsfreien JSON-Ausgabe unverändert übernehmen.
+bash Scripts/build-install-private.sh \
+  --verified-app "$VERIFIED_ROOT/FlusterFlow.app" \
+  --expected-cdhash '<cdHash-aus-der-JSON-Ausgabe>'
 ```
 
-Der vollständige Lauf erzeugt zwei voneinander getrennte Release-Builds in frischen temporären DerivedData-Verzeichnissen. Automatische Paketauflösung und Paketupdates sind deaktiviert. Für beide Artefakte werden die feste Bundle-ID `com.flusterflow.private`, `codesign --verify --deep --strict`, eine nicht-ad-hoc Signatur, das Hardened-Runtime-Flag, ausschließlich das erforderliche Entitlement `com.apple.security.device.audio-input` und das Designated Requirement geprüft. Die beiden Designated Requirements und Entitlements müssen exakt übereinstimmen.
+Der vollständige Lauf erzeugt zwei voneinander getrennte Release-Builds in frischen temporären DerivedData-Verzeichnissen. Automatische Paketauflösung und Paketupdates sind deaktiviert. Für beide Artefakte werden die feste Bundle-ID `com.flusterflow.private`, `codesign --verify --deep --strict`, eine nicht-ad-hoc Signatur, das Hardened-Runtime-Flag, ausschließlich das erforderliche Entitlement `com.apple.security.device.audio-input` und das Designated Requirement geprüft. Die beiden Designated Requirements und Entitlements müssen exakt übereinstimmen. `--export-app` kopiert erst nach diesen Prüfungen atomar genau eines der verifizierten Artefakte. Der Artifact-Modus des Installers baut nicht erneut, prüft den erwarteten CDHash sowie alle Signaturverträge noch einmal und akzeptiert den Start nur, wenn der neue Prozess aus dem installierten Bundle läuft. Jeder Fehler nach dem Austausch rollt auf die vorherige App zurück.
 
 `spctl` wird ohne Ausgabe von Pfaden, Zertifikatsnamen oder Identity-Werten ausgeführt. Die inhaltsfreie Klassifikation unterscheidet eine lokale selbstsignierte Identity mit genau einer Authority von einer verketteten Identity. Akzeptiert Gatekeeper beide Builds, liefert das Script `status: "passed"`. Lehnt Gatekeeper beide lokal selbstsignierten Builds ab, obwohl Signatur, Hardened Runtime und Requirement gültig sind, wird dies separat als `gatekeeper_local_self_signed_boundary` mit Exitcode `77` gemeldet und nicht als bestanden umgedeutet. Eine Ablehnung mit verketteter Identity ist stattdessen ein echter Prüffehler. Der anschließende manuelle Launch- sowie Mikrofon-/Accessibility-TCC-Kontinuitätstest bleibt nach automatischem Erfolg oder dokumentierter lokaler Grenze verpflichtend.
 
-Das Script erzeugt, importiert oder vertraut keine Zertifikate, exportiert keine Schlüssel und schreibt weder Identity, Benutzername noch Gerätekennung in seine JSON-Ausgabe. Alle DerivedData- und Prüfartefakte werden über einen Exit-Trap entfernt. Exitcode `0` bedeutet bestandene automatisierbare G9-Prüfung, `1` einen fail-closed Prüffehler und `77` eine externe oder manuelle Grenze.
+Das Script erzeugt, importiert oder vertraut keine Zertifikate, exportiert keine Schlüssel und schreibt weder Identity, Benutzername noch Gerätekennung in seine JSON-Ausgabe. Alle DerivedData- und Prüfartefakte werden über einen Exit-Trap entfernt; ein ausdrücklich angeforderter, vollständig verifizierter Export bleibt für Installation und Smoke bestehen. Exitcode `0` bedeutet bestandene automatisierbare G9-Prüfung, `1` einen fail-closed Prüffehler und `77` eine externe oder manuelle Grenze. `bash Scripts/test-verified-artifact-chain.sh` ist vor jedem Release verpflichtender Bestandteil der automatischen Gates.

@@ -6,12 +6,14 @@ FlusterFlow ist standardmäßig eine lokale Anwendung. Mikrofonaufnahme, lokales
 
 ## Lokaler Diktatpfad
 
-1. Audio wird während gedrücktem Push-to-talk im Arbeitsspeicher aufgenommen.
+1. Audio wird während der Aufnahme im Arbeitsspeicher erfasst und regelmäßig in der lokalen Aufnahmehistorie gesichert. Beim regulären Beenden wird auch eine kürzere Aufnahme gespeichert.
 2. Das Audio wird lokal auf Mono mit 16 kHz normalisiert.
 3. ASR und Cleanup erzeugen einen lokalen Kandidaten.
 4. Optional werden höchstens 1.500 Zeichen am fokussierten Textfeld lokal verarbeitet. Secure Fields liefern keinen Kontext und erlauben keine automatische Einfügung.
 5. Der lokale Kandidat wird über eine bestätigte Accessibility-Mutation oder – bei einem fokussierten webbasierten Textfeld – über bestätigte direkte Unicode-Tastaturereignisse eingefügt.
-6. Es gibt keine persistente Diktat-Historie, kein automatisches Ergebnisfenster und keine automatische Nutzung des General Pasteboard.
+6. Audio, Status und Transkriptversionen bleiben in der lokalen, ausdrücklich löschbaren Aufnahmehistorie erhalten. Es gibt kein automatisches Ergebnisfenster und keine automatische Nutzung des General Pasteboard.
+
+Ein erneuter Transkriptionslauf aus der Historie verwendet ausschließlich das ausgewählte lokale ASR-Modell. Er liest keinen aktuellen Zielkontext, sendet nichts an OpenAI und fügt das Ergebnis nicht automatisch ein.
 
 Der laufende lokale Diktatgraph besitzt keinen `URLSession`-Transport. Netzwerktypen liegen ausschließlich in den isolierten Opt-in-Capabilities für OpenAI und eine ausdrücklich ausgelöste Modellbereitstellung. `Scripts/verify-local-network.sh` prüft diese Dateigrenze statisch.
 

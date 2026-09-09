@@ -161,6 +161,13 @@ enum RecordingTimerText {
         "noch \(format(max(0, seconds)))"
     }
 
+    static func accessibilityValue(elapsed seconds: TimeInterval, handsFree: Bool) -> String {
+        let time = seconds >= 105
+            ? "\(remaining(seconds: 120 - seconds)) verbleibend"
+            : "\(elapsed(seconds: seconds)) aufgenommen"
+        return handsFree ? "Handsfree aktiv, \(time)" : time
+    }
+
     private static func format(_ seconds: TimeInterval) -> String {
         let total = Int(seconds.rounded(.down))
         return String(format: "%02d:%02d", total / 60, total % 60)
@@ -267,8 +274,6 @@ struct FlowBarView: View {
     var body: some View {
         HStack(spacing: 10) {
             statusContent
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(presentation.title)
 
             if let cancel {
                 Capsule()
@@ -311,6 +316,28 @@ struct FlowBarView: View {
 
     @ViewBuilder
     private var statusContent: some View {
+        if presentation == .listening, let recordingStartedAt {
+            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                let elapsed = max(0, timeline.date.timeIntervalSince(recordingStartedAt))
+                statusContentBody(elapsed: elapsed)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(presentation.title)
+                    .accessibilityValue(
+                        RecordingTimerText.accessibilityValue(
+                            elapsed: elapsed,
+                            handsFree: handsFree
+                        )
+                    )
+            }
+        } else {
+            statusContentBody(elapsed: nil)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(presentation.title)
+        }
+    }
+
+    @ViewBuilder
+    private func statusContentBody(elapsed: TimeInterval?) -> some View {
         if presentation.displaysWaveform {
             HStack(spacing: 10) {
                 RainbowWaveform(
@@ -324,18 +351,15 @@ struct FlowBarView: View {
                     .foregroundStyle(.white.opacity(0.78))
                     .lineLimit(1)
 
-                if presentation == .listening, let recordingStartedAt {
-                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                        let elapsed = max(0, timeline.date.timeIntervalSince(recordingStartedAt))
-                        Text(
-                            elapsed >= 105
-                                ? RecordingTimerText.remaining(seconds: 120 - elapsed)
-                                : RecordingTimerText.elapsed(seconds: elapsed)
-                        )
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(elapsed >= 105 ? .orange : .white.opacity(0.72))
-                        .monospacedDigit()
-                    }
+                if let elapsed {
+                    Text(
+                        elapsed >= 105
+                            ? RecordingTimerText.remaining(seconds: 120 - elapsed)
+                            : RecordingTimerText.elapsed(seconds: elapsed)
+                    )
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(elapsed >= 105 ? .orange : .white.opacity(0.72))
+                    .monospacedDigit()
                 }
 
                 if presentation == .listening, handsFree {

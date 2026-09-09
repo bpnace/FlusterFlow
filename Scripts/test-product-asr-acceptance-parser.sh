@@ -22,7 +22,8 @@ write_fixture() {
 
 assert_passes() {
   local name="$1"
-  if ! product_asr_smoke_passed "$TMP_DIR/$name.log"; then
+  local test_name="${2:-testInstalledAdaptiveWhisperRunsTheProductASRPathWhenExplicitlyRequested}"
+  if ! product_asr_smoke_passed "$TMP_DIR/$name.log" "$test_name"; then
     echo "Expected parser to accept $name" >&2
     exit 1
   fi
@@ -30,7 +31,8 @@ assert_passes() {
 
 assert_rejects() {
   local name="$1"
-  if product_asr_smoke_passed "$TMP_DIR/$name.log"; then
+  local test_name="${2:-testInstalledAdaptiveWhisperRunsTheProductASRPathWhenExplicitlyRequested}"
+  if product_asr_smoke_passed "$TMP_DIR/$name.log" "$test_name"; then
     echo "Expected parser to reject $name" >&2
     exit 1
   fi
@@ -66,5 +68,17 @@ assert_passes xcode-compact
 assert_rejects skipped
 assert_rejects not-run
 assert_rejects suite-only-pass
+assert_rejects legacy-xctest testInstalledWhisperLargeFinalizesAudioWhenExplicitlyRequested
 
-echo "Product ASR acceptance parser fixtures: PASS"
+mkdir -p "$TMP_DIR/audio fixtures"
+touch "$TMP_DIR/audio fixtures/live smoke.aiff"
+pushd "$TMP_DIR" >/dev/null
+resolved_audio_path="$(absolute_audio_path 'audio fixtures/live smoke.aiff')"
+popd >/dev/null
+canonical_tmp_dir="$(cd "$TMP_DIR" && pwd -P)"
+if [ "$resolved_audio_path" != "$canonical_tmp_dir/audio fixtures/live smoke.aiff" ]; then
+  echo "Expected a relative audio input to resolve to an absolute path" >&2
+  exit 1
+fi
+
+echo "Installed-model recognizer acceptance parser fixtures: PASS"

@@ -273,6 +273,7 @@ enum InsertionOutcome: Equatable, Sendable {
 struct DictationSession: Sendable {
     let id: DictationSessionID
     let language: DictationLanguage
+    var recordingStartedAt: Date?
     var capturedTargetContext: CapturedTargetContext?
     var audioInput: AudioInput?
     var rawTranscript: RawTranscript?

@@ -2,6 +2,10 @@ import AppKit
 import Combine
 import SwiftUI
 
+enum OnboardingPrivacyCopy {
+    static let localHistory = "Lokal löschbare Aufnahmehistorie · keine Telemetrie · keine automatische Zwischenablage · Cloud aus"
+}
+
 @MainActor
 final class OnboardingWindowController: NSWindowController {
     private let store: SettingsStore
@@ -235,7 +239,7 @@ private struct OnboardingView: View {
                     Image(systemName: "lock.shield.fill")
                         .foregroundStyle(.green)
                         .accessibilityHidden(true)
-                    Text("Keine Aufnahmehistorie · keine Telemetrie · keine automatische Zwischenablage · Cloud aus")
+                    Text(OnboardingPrivacyCopy.localHistory)
                         .font(.callout.weight(.medium))
                 }
 

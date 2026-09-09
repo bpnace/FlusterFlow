@@ -223,6 +223,156 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(snapshot.prewarmCount, 1)
     }
 
+    func testSessionCancellationWaitsForPrepareTermination() async {
+        let samples = AudioBufferStore()
+        let input = await samples.store(AudioSamples(values: [0.1, -0.1]))
+        let runtime = CancellationBlockingWhisperKitRuntime(blockedOperation: .prepare)
+        let recognizer = WhisperKitRecognizer(
+            sampleAccess: samples,
+            modelStore: ReadyLocalModelChecker(directory: URL(fileURLWithPath: "/private/model")),
+            tokenizerStore: ReadyLocalModelChecker(directory: URL(fileURLWithPath: "/private/tokenizer")),
+            runtime: runtime
+        )
+        let sessionID = DictationSessionID(rawValue: 7_101)
+
+        let transcription = Task {
+            try await recognizer.transcribe(
+                input,
+                hints: RecognitionHints(language: .automatic, terms: []),
+                sessionID: sessionID
+            )
+        }
+        await runtime.waitUntilBlockedOperationStarts()
+
+        let cancellationReturned = WhisperAsyncTestFlag()
+        let cancellation = Task {
+            await recognizer.cancel(sessionID: sessionID)
+            await cancellationReturned.set()
+        }
+        await runtime.waitUntilCancellationIsObserved()
+
+        let returnedBeforeTermination = await cancellationReturned.value
+        XCTAssertFalse(returnedBeforeTermination)
+        await runtime.allowBlockedOperationToTerminate()
+        await cancellation.value
+        let returnedAfterTermination = await cancellationReturned.value
+        XCTAssertTrue(returnedAfterTermination)
+        _ = try? await transcription.value
+        await samples.release(input)
+    }
+
+    func testSessionCancellationWaitsForPrewarmTermination() async {
+        let runtime = CancellationBlockingWhisperKitRuntime(blockedOperation: .prewarm)
+        let recognizer = WhisperKitRecognizer(
+            sampleAccess: AudioBufferStore(),
+            modelStore: ReadyLocalModelChecker(directory: URL(fileURLWithPath: "/private/model")),
+            tokenizerStore: ReadyLocalModelChecker(directory: URL(fileURLWithPath: "/private/tokenizer")),
+            runtime: runtime
+        )
+        let sessionID = DictationSessionID(rawValue: 7_102)
+
+        let prewarm = Task { try await recognizer.prewarm() }
+        await runtime.waitUntilBlockedOperationStarts()
+
+        let cancellationReturned = WhisperAsyncTestFlag()
+        let cancellation = Task {
+            await recognizer.cancel(sessionID: sessionID)
+            await cancellationReturned.set()
+        }
+        await runtime.waitUntilCancellationIsObserved()
+
+        let returnedBeforeTermination = await cancellationReturned.value
+        XCTAssertFalse(returnedBeforeTermination)
+        await runtime.allowBlockedOperationToTerminate()
+        await cancellation.value
+        let returnedAfterTermination = await cancellationReturned.value
+        XCTAssertTrue(returnedAfterTermination)
+        _ = try? await prewarm.value
+    }
+
+    func testOfflineRuntimeCancellationWaitsForTrackedTaskTermination() async {
+        let runtime = OfflineWhisperKitRuntime()
+        let sessionID = DictationSessionID(rawValue: 7_103)
+        let started = WhisperAsyncTestGate()
+        let cancellationObserved = WhisperAsyncTestGate()
+        let allowTermination = WhisperAsyncTestGate()
+        let cancellationReturned = WhisperAsyncTestFlag()
+
+        let transcription = Task {
+            try await runtime.runTrackedTranscription(sessionID: sessionID) {
+                try await withTaskCancellationHandler {
+                    await started.open()
+                    await allowTermination.wait()
+                    try Task.checkCancellation()
+                    return Self.syntheticWhisperResult(text: "unreachable")
+                } onCancel: {
+                    Task { await cancellationObserved.open() }
+                }
+            }
+        }
+        await started.wait()
+
+        let cancellation = Task {
+            await runtime.cancel(sessionID: sessionID)
+            await cancellationReturned.set()
+        }
+        await cancellationObserved.wait()
+
+        let returnedBeforeTermination = await cancellationReturned.value
+        XCTAssertFalse(returnedBeforeTermination)
+        await allowTermination.open()
+        await cancellation.value
+        let returnedAfterTermination = await cancellationReturned.value
+        XCTAssertTrue(returnedAfterTermination)
+        _ = try? await transcription.value
+    }
+
+    func testRouterCancellationDuringSampleAccessPreventsLateWhisperRuntimeStart() async throws {
+        let sampleAccess = BlockingWhisperSampleAccess()
+        let runtime = RecordingWhisperCancellationRuntime()
+        let recognizer = WhisperKitRecognizer(
+            sampleAccess: sampleAccess,
+            modelStore: ReadyLocalModelChecker(directory: URL(fileURLWithPath: "/private/model")),
+            tokenizerStore: ReadyLocalModelChecker(directory: URL(fileURLWithPath: "/private/tokenizer")),
+            runtime: runtime
+        )
+        let router = SessionModelSpeechRecognizer(
+            recognizers: [.whisperKitLargeV3Turbo: recognizer]
+        )
+        let sessionID = DictationSessionID(rawValue: 7_104)
+        await router.register(.whisperKitLargeV3Turbo, for: sessionID)
+
+        let transcription = Task {
+            try await router.transcribe(
+                AudioInput(buffer: AudioBufferHandle(rawValue: 7_104)),
+                hints: RecognitionHints(language: .automatic, terms: []),
+                sessionID: sessionID
+            )
+        }
+        await sampleAccess.waitUntilAccessStarts()
+
+        let cancellationReturned = WhisperAsyncTestFlag()
+        let cancellation = Task {
+            await router.cancel(sessionID: sessionID)
+            await cancellationReturned.set()
+        }
+        await runtime.waitUntilCancellationIsObserved()
+
+        let returnedWhileSampleAccessWasBlocked = await cancellationReturned.value
+        let countWhileSampleAccessWasBlocked = await runtime.transcriptionCount
+        XCTAssertFalse(returnedWhileSampleAccessWasBlocked)
+        XCTAssertEqual(countWhileSampleAccessWasBlocked, 0)
+
+        await sampleAccess.allowAccessToReturn()
+        await cancellation.value
+        _ = try? await transcription.value
+
+        let returnedAfterSampleAccessCompleted = await cancellationReturned.value
+        let finalTranscriptionCount = await runtime.transcriptionCount
+        XCTAssertTrue(returnedAfterSampleAccessCompleted)
+        XCTAssertEqual(finalTranscriptionCount, 0)
+    }
+
     func testSessionRouterKeepsChoiceStableAndCancelsOriginalBackend() async throws {
         let parakeet = RecordingSpeechRecognizer(text: "parakeet")
         let turbo = RecordingSpeechRecognizer(text: "turbo")
@@ -249,6 +399,45 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(parakeetCancellations, [])
     }
 
+    func testSessionRouterDeadlineQuarantinesNeverCompletingRecognition() async {
+        let recognizer = NeverCompletingSpeechRecognizer()
+        let router = SessionModelSpeechRecognizer(
+            recognizers: [.whisperKitLargeV3Turbo: recognizer],
+            productASRDeadline: .milliseconds(30),
+            productASRCancellationGrace: .milliseconds(10)
+        )
+        let sessionID = DictationSessionID(rawValue: 9_001)
+        await router.register(.whisperKitLargeV3Turbo, for: sessionID)
+
+        do {
+            _ = try await router.transcribe(
+                AudioInput(buffer: AudioBufferHandle(rawValue: 9_001)),
+                hints: RecognitionHints(language: .automatic, terms: []),
+                sessionID: sessionID
+            )
+            XCTFail("Expected the product ASR deadline to expire")
+        } catch {
+            XCTAssertEqual(error as? ProductASRDeadlineError, .exceeded)
+        }
+
+        let cancellationCount = await recognizer.cancellationCount()
+        XCTAssertEqual(cancellationCount, 1)
+
+        let nextSessionID = DictationSessionID(rawValue: 9_002)
+        await router.register(.whisperKitLargeV3Turbo, for: nextSessionID)
+        await XCTAssertThrowsSessionRouterError(
+            try await router.acquireExclusiveAccess(
+                for: nextSessionID,
+                purpose: .historyRetranscription
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SessionModelSpeechRecognizerError,
+                .recognizerBusy(activePurpose: .liveDictation)
+            )
+        }
+    }
+
     func testSessionRouterLifecycleFallsBackForBatchRecognizersAndFinalizesViaTranscribe() async throws {
         let recognizer = RecordingSpeechRecognizer(text: "batch")
         let router = SessionModelSpeechRecognizer(recognizers: [.whisperKitLargeV3Turbo: recognizer])
@@ -271,6 +460,141 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
 
         XCTAssertEqual(disposition, .ignoredBatchRecognizer)
         XCTAssertEqual(transcript.text, "batch")
+    }
+
+    func testSessionRouterRejectsConcurrentRecognitionAndReleasesLeaseAfterCancellation() async throws {
+        let recognizer = PausingSpeechRecognizer()
+        let router = SessionModelSpeechRecognizer(
+            recognizers: [.whisperKitLargeV3Turbo: recognizer]
+        )
+        let firstSession = DictationSessionID(rawValue: 101)
+        let secondSession = DictationSessionID(rawValue: 102)
+        await router.register(.whisperKitLargeV3Turbo, for: firstSession)
+        await router.register(.whisperKitLargeV3Turbo, for: secondSession)
+
+        let firstTask = Task {
+            try await router.transcribe(
+                AudioInput(buffer: AudioBufferHandle(rawValue: 1)),
+                hints: RecognitionHints(language: .automatic, terms: []),
+                sessionID: firstSession
+            )
+        }
+        await recognizer.waitUntilStarted()
+
+        await XCTAssertThrowsSessionRouterError(
+            try await router.transcribe(
+                AudioInput(buffer: AudioBufferHandle(rawValue: 2)),
+                hints: RecognitionHints(language: .automatic, terms: []),
+                sessionID: secondSession
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SessionModelSpeechRecognizerError,
+                .recognizerBusy(activePurpose: .liveDictation)
+            )
+        }
+
+        let cancellation = Task {
+            await router.cancel(sessionID: firstSession)
+        }
+        await recognizer.waitUntilCancellationRequested()
+        await XCTAssertThrowsSessionRouterError(
+            try await router.acquireExclusiveAccess(
+                for: secondSession,
+                purpose: .historyRetranscription
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SessionModelSpeechRecognizerError,
+                .recognizerBusy(activePurpose: .liveDictation)
+            )
+        }
+        await recognizer.resume()
+        await cancellation.value
+        _ = try? await firstTask.value
+
+        let second = try await router.transcribe(
+            AudioInput(buffer: AudioBufferHandle(rawValue: 2)),
+            hints: RecognitionHints(language: .automatic, terms: []),
+            sessionID: secondSession
+        )
+        XCTAssertEqual(second.text, "resumed")
+    }
+
+    func testExplicitHistoryLeaseFailsFastWhileLiveLeaseIsHeld() async throws {
+        let router = SessionModelSpeechRecognizer(recognizers: [:])
+        let liveSession = DictationSessionID(rawValue: 201)
+        let historySession = DictationSessionID(rawValue: 202)
+
+        try await router.acquireExclusiveAccess(
+            for: liveSession,
+            purpose: .liveDictation
+        )
+        await XCTAssertThrowsSessionRouterError(
+            try await router.acquireExclusiveAccess(
+                for: historySession,
+                purpose: .historyRetranscription
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SessionModelSpeechRecognizerError,
+                .recognizerBusy(activePurpose: .liveDictation)
+            )
+        }
+
+        await router.releaseExclusiveAccess(for: liveSession)
+        try await router.acquireExclusiveAccess(
+            for: historySession,
+            purpose: .historyRetranscription
+        )
+        await router.releaseExclusiveAccess(for: historySession)
+    }
+
+    func testLateLeaseAcquisitionIsReleasedAfterEarlierCancellation() async throws {
+        let router = SessionModelSpeechRecognizer(recognizers: [:])
+        let cancelledSession = DictationSessionID(rawValue: 251)
+        let nextSession = DictationSessionID(rawValue: 252)
+
+        await router.cancel(sessionID: cancelledSession)
+        try await router.acquireExclusiveAccess(
+            for: cancelledSession,
+            purpose: .liveDictation
+        )
+        await router.cancel(sessionID: cancelledSession)
+
+        try await router.acquireExclusiveAccess(
+            for: nextSession,
+            purpose: .historyRetranscription
+        )
+        await router.releaseExclusiveAccess(for: nextSession)
+    }
+
+    func testUnregisteredStreamingUpdateReleasesNewlyAcquiredLease() async throws {
+        let router = SessionModelSpeechRecognizer(recognizers: [:])
+        let unregisteredSession = DictationSessionID(rawValue: 301)
+        let nextSession = DictationSessionID(rawValue: 302)
+
+        await XCTAssertThrowsSessionRouterError(
+            try await router.updateRecognitionSession(
+                with: RecognitionAudioChunk(
+                    samples: [0.1],
+                    sampleRate: 16_000,
+                    channelCount: 1
+                ),
+                sessionID: unregisteredSession
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SessionModelSpeechRecognizerError,
+                .sessionNotRegistered
+            )
+        }
+
+        try await router.acquireExclusiveAccess(
+            for: nextSession,
+            purpose: .historyRetranscription
+        )
+        await router.releaseExclusiveAccess(for: nextSession)
     }
 
     func testAdaptivePolicyTriggersLargeFallbackForQualityThresholds() {
@@ -394,6 +718,36 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(transcript.backend, .whisperKitLargeV3)
         XCTAssertEqual(transcript.adaptive?.attemptedBackends, [.whisperKitLargeV3Turbo, .whisperKitLargeV3])
         XCTAssertEqual(transcript.adaptive?.largeFallbackAccepted, true)
+    }
+
+    func testAdaptiveRecognizerDoesNotStartLargeAfterSharedDeadlineExpires() async {
+        let turbo = RecordingSpeechRecognizer(
+            transcript: RawTranscript(
+                text: "uncertain",
+                language: .english,
+                backend: .whisperKitLargeV3Turbo,
+                avgLogprob: -0.95
+            )
+        )
+        let large = RecordingSpeechRecognizer(text: "must not run")
+        let recognizer = AdaptiveWhisperKitRecognizer(turbo: turbo, large: large)
+        let expiredDeadline = ContinuousClock().now
+
+        do {
+            _ = try await ProductASRDeadlineContext.$deadline.withValue(expiredDeadline) {
+                try await recognizer.transcribe(
+                    AudioInput(buffer: AudioBufferHandle(rawValue: 9_003)),
+                    hints: RecognitionHints(language: .english, terms: []),
+                    sessionID: DictationSessionID(rawValue: 9_003)
+                )
+            }
+            XCTFail("Expected the shared product ASR deadline to be enforced")
+        } catch {
+            XCTAssertEqual(error as? ProductASRDeadlineError, .exceeded)
+        }
+
+        let largeTranscriptions = await large.transcriptionCount()
+        XCTAssertEqual(largeTranscriptions, 0)
     }
 
     func testAdaptiveRecognizerUsesLargeWhenTurboFails() async throws {
@@ -596,8 +950,7 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
             model: .whisperLargeV3Turbo,
             backend: .whisperKitLargeV3Turbo,
             promptTerm: "Whisper Turbo",
-            sessionSeed: 9_002,
-            transcriptLabel: "WHISPER_TURBO_TRANSCRIPT"
+            sessionSeed: 9_002
         )
     }
 
@@ -615,8 +968,7 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
             model: .whisperLargeV3,
             backend: .whisperKitLargeV3,
             promptTerm: "Whisper Large",
-            sessionSeed: 9_004,
-            transcriptLabel: "WHISPER_LARGE_TRANSCRIPT"
+            sessionSeed: 9_004
         )
     }
 
@@ -682,7 +1034,6 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
 
         XCTAssertFalse(transcript.text.isEmpty)
         XCTAssertNotNil(transcript.adaptive)
-        print("ADAPTIVE_WHISPER_TRANSCRIPT=\(transcript.text)")
     }
 
     private static func assertInstalledWhisperModelTranscribesAudio(
@@ -690,8 +1041,7 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         model: ModelManifest,
         backend: RecognitionBackend,
         promptTerm: String,
-        sessionSeed: UInt64,
-        transcriptLabel: String
+        sessionSeed: UInt64
     ) async throws {
         let audio = try normalizedAudio(at: audioURL)
         XCTAssertFalse(audio.values.isEmpty)
@@ -735,7 +1085,6 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
 
         XCTAssertEqual(disposition, .accepted)
         XCTAssertFalse(transcript.text.isEmpty)
-        print("\(transcriptLabel)=\(transcript.text)")
     }
 
     private static func normalizedAudio(at url: URL) throws -> AudioSamples {
@@ -765,6 +1114,192 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
             )
         }
         return try PCMNormalizer.normalize(realtimeChunks)
+    }
+
+    fileprivate static func syntheticWhisperResult(text: String) -> WhisperKitRecognitionResult {
+        WhisperKitRecognitionResult(
+            text: text,
+            segments: [],
+            avgLogprob: nil,
+            minWordProbability: nil,
+            compressionRatio: nil,
+            decoderFallback: .none
+        )
+    }
+}
+
+private actor WhisperAsyncTestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
+private actor WhisperAsyncTestFlag {
+    private(set) var value = false
+
+    func set() {
+        value = true
+    }
+}
+
+private actor BlockingWhisperSampleAccess: AudioSampleAccessing {
+    private let accessStarted = WhisperAsyncTestGate()
+    private let allowReturn = WhisperAsyncTestGate()
+
+    func samples(for input: AudioInput) async throws -> AudioSamples {
+        _ = input
+        await accessStarted.open()
+        await allowReturn.wait()
+        return AudioSamples(values: [0.1, -0.1])
+    }
+
+    func release(_ input: AudioInput) {
+        _ = input
+    }
+
+    func waitUntilAccessStarts() async {
+        await accessStarted.wait()
+    }
+
+    func allowAccessToReturn() async {
+        await allowReturn.open()
+    }
+}
+
+private actor RecordingWhisperCancellationRuntime: WhisperKitRuntimeServing {
+    private let cancellationObserved = WhisperAsyncTestGate()
+    private(set) var transcriptionCount = 0
+
+    func prepare(modelDirectory: URL, tokenizerDirectory: URL) {
+        _ = modelDirectory
+        _ = tokenizerDirectory
+    }
+
+    func prewarm(modelDirectory: URL, tokenizerDirectory: URL) {
+        _ = modelDirectory
+        _ = tokenizerDirectory
+    }
+
+    func unload() {}
+
+    func prioritizedPromptTokens(for terms: [String], maxTokens: Int) -> [Int] {
+        _ = terms
+        _ = maxTokens
+        return []
+    }
+
+    func transcribe(
+        samples: [Float],
+        language: WhisperKitLanguageMode,
+        promptTokens: [Int],
+        sessionID: DictationSessionID
+    ) -> WhisperKitRecognitionResult {
+        _ = samples
+        _ = language
+        _ = promptTokens
+        _ = sessionID
+        transcriptionCount += 1
+        return WhisperKitRecognizerTests.syntheticWhisperResult(text: "unexpected")
+    }
+
+    func cancel(sessionID: DictationSessionID) async {
+        _ = sessionID
+        await cancellationObserved.open()
+    }
+
+    func waitUntilCancellationIsObserved() async {
+        await cancellationObserved.wait()
+    }
+}
+
+private actor CancellationBlockingWhisperKitRuntime: WhisperKitRuntimeServing {
+    enum BlockedOperation: Equatable, Sendable {
+        case prepare
+        case prewarm
+    }
+
+    private let blockedOperation: BlockedOperation
+    private let operationStarted = WhisperAsyncTestGate()
+    private let cancellationObserved = WhisperAsyncTestGate()
+    private let allowTermination = WhisperAsyncTestGate()
+
+    init(blockedOperation: BlockedOperation) {
+        self.blockedOperation = blockedOperation
+    }
+
+    func prepare(modelDirectory: URL, tokenizerDirectory: URL) async throws {
+        _ = modelDirectory
+        _ = tokenizerDirectory
+        guard blockedOperation == .prepare else { return }
+        try await blockUntilCancelledAndReleased()
+    }
+
+    func prewarm(modelDirectory: URL, tokenizerDirectory: URL) async throws {
+        _ = modelDirectory
+        _ = tokenizerDirectory
+        guard blockedOperation == .prewarm else { return }
+        try await blockUntilCancelledAndReleased()
+    }
+
+    func unload() {}
+
+    func prioritizedPromptTokens(for terms: [String], maxTokens: Int) -> [Int] {
+        _ = terms
+        _ = maxTokens
+        return []
+    }
+
+    func transcribe(
+        samples: [Float],
+        language: WhisperKitLanguageMode,
+        promptTokens: [Int],
+        sessionID: DictationSessionID
+    ) -> WhisperKitRecognitionResult {
+        _ = samples
+        _ = language
+        _ = promptTokens
+        _ = sessionID
+        return WhisperKitRecognizerTests.syntheticWhisperResult(text: "unused")
+    }
+
+    func cancel(sessionID: DictationSessionID) {
+        _ = sessionID
+    }
+
+    func waitUntilBlockedOperationStarts() async {
+        await operationStarted.wait()
+    }
+
+    func waitUntilCancellationIsObserved() async {
+        await cancellationObserved.wait()
+    }
+
+    func allowBlockedOperationToTerminate() async {
+        await allowTermination.open()
+    }
+
+    private func blockUntilCancelledAndReleased() async throws {
+        try await withTaskCancellationHandler {
+            await operationStarted.open()
+            await allowTermination.wait()
+            try Task.checkCancellation()
+        } onCancel: {
+            Task { await cancellationObserved.open() }
+        }
     }
 }
 
@@ -957,6 +1492,7 @@ private actor ReadyLocalModelChecker: LocalModelChecking {
 private actor RecordingSpeechRecognizer: SpeechRecognizing {
     private let transcript: RawTranscript
     private var cancelled: [DictationSessionID] = []
+    private var transcriptions = 0
 
     init(text: String) {
         self.transcript = RawTranscript(text: text, language: .automatic)
@@ -973,6 +1509,7 @@ private actor RecordingSpeechRecognizer: SpeechRecognizing {
     ) -> RawTranscript {
         _ = audio
         _ = sessionID
+        transcriptions += 1
         return RawTranscript(
             text: transcript.text,
             language: hints.language,
@@ -993,6 +1530,109 @@ private actor RecordingSpeechRecognizer: SpeechRecognizing {
 
     func cancelledSessions() -> [DictationSessionID] {
         cancelled
+    }
+
+    func transcriptionCount() -> Int { transcriptions }
+}
+
+private actor NeverCompletingSpeechRecognizer: SpeechRecognizing {
+    private var cancellations = 0
+
+    func transcribe(
+        _ audio: AudioInput,
+        hints: RecognitionHints,
+        sessionID: DictationSessionID
+    ) async throws -> RawTranscript {
+        while true {
+            do {
+                try await Task.sleep(for: .seconds(3_600))
+            } catch {
+                // Deliberately ignore structured cancellation to exercise quarantine.
+            }
+        }
+    }
+
+    func cancel(sessionID: DictationSessionID) async {
+        cancellations += 1
+        while true {
+            try? await Task.sleep(for: .seconds(3_600))
+        }
+    }
+
+    func cancellationCount() -> Int { cancellations }
+
+}
+
+private actor PausingSpeechRecognizer: SpeechRecognizing {
+    private var started = false
+    private var cancellationRequested = false
+    private var invocationCount = 0
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var resumeWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func transcribe(
+        _ audio: AudioInput,
+        hints: RecognitionHints,
+        sessionID: DictationSessionID
+    ) async -> RawTranscript {
+        _ = audio
+        _ = hints
+        _ = sessionID
+        invocationCount += 1
+        guard invocationCount == 1 else {
+            return RawTranscript(text: "resumed", language: .automatic)
+        }
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            resumeWaiters.append(continuation)
+        }
+        return RawTranscript(text: "resumed", language: .automatic)
+    }
+
+    func cancel(sessionID: DictationSessionID) {
+        _ = sessionID
+        cancellationRequested = true
+        let waiters = cancellationWaiters
+        cancellationWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilCancellationRequested() async {
+        if cancellationRequested { return }
+        await withCheckedContinuation { continuation in
+            cancellationWaiters.append(continuation)
+        }
+    }
+
+    func resume() {
+        let waiters = resumeWaiters
+        resumeWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private func XCTAssertThrowsSessionRouterError<T>(
+    _ expression: @autoclosure () async throws -> T,
+    _ errorHandler: (Error) -> Void = { _ in },
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        _ = try await expression()
+        XCTFail("Expected expression to throw", file: file, line: line)
+    } catch {
+        errorHandler(error)
     }
 }
 

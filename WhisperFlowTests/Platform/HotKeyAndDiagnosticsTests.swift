@@ -504,6 +504,22 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(RecordingTimerText.elapsed(seconds: 65), "01:05")
         XCTAssertEqual(RecordingTimerText.remaining(seconds: 15), "noch 00:15")
         XCTAssertEqual(RecordingTimerText.remaining(seconds: -1), "noch 00:00")
+        XCTAssertEqual(
+            RecordingTimerText.accessibilityValue(elapsed: 65, handsFree: false),
+            "01:05 aufgenommen"
+        )
+        XCTAssertEqual(
+            RecordingTimerText.accessibilityValue(elapsed: 110, handsFree: true),
+            "Handsfree aktiv, noch 00:10 verbleibend"
+        )
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(
+            RecordingDeadline.remainingDuration(
+                recordingStartedAt: startedAt,
+                now: startedAt.addingTimeInterval(35)
+            ),
+            85
+        )
     }
 
     func testRainbowWaveformGeometryIsBoundedAndChangesOverTime() {
@@ -584,9 +600,25 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
             .showCancelled
         )
         XCTAssertEqual(
+            CancelOutcome.failed(
+                sessionID,
+                DictationFailure(stage: .audioFinalize)
+            ).presentationDecision,
+            .showError
+        )
+        XCTAssertEqual(CancelOutcome.cancelled(sessionID).terminatedSessionID, sessionID)
+        XCTAssertEqual(
+            CancelOutcome.failed(
+                sessionID,
+                DictationFailure(stage: .audioFinalize)
+            ).terminatedSessionID,
+            sessionID
+        )
+        XCTAssertEqual(
             CancelOutcome.tooLateCommitted(sessionID).presentationDecision,
             .deferToOperationCompletion
         )
+        XCTAssertNil(CancelOutcome.tooLateCommitted(sessionID).terminatedSessionID)
         XCTAssertEqual(
             CancelOutcome.ignoredStale(sessionID).presentationDecision,
             .unchanged
@@ -594,6 +626,54 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(
             CancelOutcome.noActiveSession.presentationDecision,
             .unchanged
+        )
+
+        XCTAssertEqual(
+            CancelOutcome.cancelled(sessionID).presentationDecision(
+                errorTerminalSessionID: nil
+            ),
+            .showCancelled
+        )
+        XCTAssertEqual(
+            CancelOutcome.cancelled(sessionID).presentationDecision(
+                errorTerminalSessionID: sessionID
+            ),
+            .showError
+        )
+        XCTAssertEqual(
+            CancelOutcome.failed(
+                sessionID,
+                DictationFailure(stage: .audioFinalize)
+            ).presentationDecision(errorTerminalSessionID: nil),
+            .showError
+        )
+        XCTAssertEqual(
+            CancelOutcome.tooLateCommitted(sessionID).presentationDecision(
+                errorTerminalSessionID: nil
+            ),
+            .deferToOperationCompletion
+        )
+        XCTAssertEqual(
+            CancelOutcome.ignoredStale(sessionID).presentationDecision(
+                errorTerminalSessionID: nil
+            ),
+            .unchanged
+        )
+        XCTAssertEqual(
+            CancelOutcome.noActiveSession.presentationDecision(
+                errorTerminalSessionID: nil
+            ),
+            .unchanged
+        )
+    }
+
+    func testEarlyPrimingCancellationTerminatesWhenNoSessionExistsYet() {
+        XCTAssertEqual(
+            CancelOutcome.noActiveSession.presentationDecision(
+                errorTerminalSessionID: nil,
+                cancelledBeforeSessionStart: true
+            ),
+            .showCancelled
         )
     }
 

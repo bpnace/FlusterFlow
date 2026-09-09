@@ -141,6 +141,122 @@ final class Qwen3ASRRecognizerTests: XCTestCase, @unchecked Sendable {
         try await runtime.prepare(modelDirectory: try await store.validatedDirectory())
     }
 
+    func testRuntimeCancellationWaitsForTrackedTaskTermination() async {
+        let runtime = OfflineQwen3ASRRuntime()
+        let sessionID = DictationSessionID(rawValue: 7_002)
+        let started = QwenAsyncTestGate()
+        let cancellationObserved = QwenAsyncTestGate()
+        let allowTermination = QwenAsyncTestGate()
+        let cancellationReturned = QwenAsyncTestFlag()
+
+        let transcription = Task {
+            try await runtime.runTrackedTranscription(sessionID: sessionID) {
+                try await withTaskCancellationHandler {
+                    await started.open()
+                    await allowTermination.wait()
+                    try Task.checkCancellation()
+                    return "unreachable"
+                } onCancel: {
+                    Task { await cancellationObserved.open() }
+                }
+            }
+        }
+        await started.wait()
+
+        let cancellation = Task {
+            await runtime.cancel(sessionID: sessionID)
+            await cancellationReturned.set()
+        }
+        await cancellationObserved.wait()
+
+        let returnedBeforeTermination = await cancellationReturned.value
+        XCTAssertFalse(returnedBeforeTermination)
+        await allowTermination.open()
+        await cancellation.value
+        let returnedAfterTermination = await cancellationReturned.value
+        XCTAssertTrue(returnedAfterTermination)
+        _ = try? await transcription.value
+    }
+
+    func testRouterCancellationDuringSampleAccessPreventsLateRuntimeStart() async throws {
+        let sampleAccess = BlockingQwenSampleAccess()
+        let runtime = RecordingQwenCancellationRuntime()
+        let recognizer = Qwen3ASRRecognizer(
+            sampleAccess: sampleAccess,
+            modelStore: QwenReadyLocalModelChecker(directory: URL(fileURLWithPath: "/private/model")),
+            runtime: runtime
+        )
+        let router = SessionModelSpeechRecognizer(recognizers: [.qwen3ASR06B8Bit: recognizer])
+        let firstSession = DictationSessionID(rawValue: 7_021)
+        let secondSession = DictationSessionID(rawValue: 7_022)
+        await router.register(.qwen3ASR06B8Bit, for: firstSession)
+        await router.register(.qwen3ASR06B8Bit, for: secondSession)
+
+        let transcription = Task {
+            try await router.transcribe(
+                AudioInput(buffer: AudioBufferHandle(rawValue: 7_021)),
+                hints: RecognitionHints(language: .automatic, terms: []),
+                sessionID: firstSession
+            )
+        }
+        await sampleAccess.waitUntilAccessStarts()
+
+        let cancellationReturned = QwenAsyncTestFlag()
+        let cancellation = Task {
+            await router.cancel(sessionID: firstSession)
+            await cancellationReturned.set()
+        }
+        await sampleAccess.waitUntilCancellationIsObserved()
+
+        do {
+            try await router.acquireExclusiveAccess(
+                for: secondSession,
+                purpose: .historyRetranscription
+            )
+            XCTFail("The lease must stay held while cancelled sample access is still terminating")
+        } catch {
+            XCTAssertEqual(
+                error as? SessionModelSpeechRecognizerError,
+                .recognizerBusy(activePurpose: .liveDictation)
+            )
+        }
+        do {
+            _ = try await router.transcribe(
+                AudioInput(buffer: AudioBufferHandle(rawValue: 7_022)),
+                hints: RecognitionHints(language: .automatic, terms: []),
+                sessionID: secondSession
+            )
+            XCTFail("A second session must not execute while sample access is still terminating")
+        } catch {
+            XCTAssertEqual(
+                error as? SessionModelSpeechRecognizerError,
+                .recognizerBusy(activePurpose: .liveDictation)
+            )
+        }
+        let countWhileTerminating = await runtime.transcriptionCount
+        XCTAssertEqual(countWhileTerminating, 0)
+        let returnedBeforeTermination = await cancellationReturned.value
+        XCTAssertFalse(returnedBeforeTermination)
+
+        await sampleAccess.allowAccessToTerminate()
+        await cancellation.value
+        _ = try? await transcription.value
+
+        try await router.acquireExclusiveAccess(
+            for: secondSession,
+            purpose: .historyRetranscription
+        )
+        let secondTranscript = try await router.transcribe(
+            AudioInput(buffer: AudioBufferHandle(rawValue: 7_022)),
+            hints: RecognitionHints(language: .automatic, terms: []),
+            sessionID: secondSession
+        )
+        await router.releaseExclusiveAccess(for: secondSession)
+        let transcriptionCount = await runtime.transcriptionCount
+        XCTAssertEqual(secondTranscript.text, "unexpected")
+        XCTAssertEqual(transcriptionCount, 1)
+    }
+
     func testInstalledQwenModelTranscribesAudioWhenExplicitlyRequested() async throws {
         guard let audioPath = ProcessInfo.processInfo.environment[
             "FLUSTERFLOW_QWEN_SMOKE_AUDIO"
@@ -172,7 +288,6 @@ final class Qwen3ASRRecognizerTests: XCTestCase, @unchecked Sendable {
         await samples.release(input)
 
         XCTAssertFalse(transcript.text.isEmpty)
-        print("QWEN_TRANSCRIPT=\(transcript.text)")
     }
 
     func testInstallPinnedQwenModelWhenExplicitlyRequested() async throws {
@@ -221,6 +336,92 @@ final class Qwen3ASRRecognizerTests: XCTestCase, @unchecked Sendable {
         return try PCMNormalizer.normalize([
             CapturedAudioChunk(monoSamples: mono, sampleRate: format.sampleRate)
         ])
+    }
+}
+
+private actor QwenAsyncTestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
+private actor QwenAsyncTestFlag {
+    private(set) var value = false
+
+    func set() {
+        value = true
+    }
+}
+
+private actor BlockingQwenSampleAccess: AudioSampleAccessing {
+    private let accessStarted = QwenAsyncTestGate()
+    private let cancellationObserved = QwenAsyncTestGate()
+    private let allowTermination = QwenAsyncTestGate()
+
+    func samples(for input: AudioInput) async throws -> AudioSamples {
+        _ = input
+        return try await withTaskCancellationHandler {
+            await accessStarted.open()
+            await allowTermination.wait()
+            try Task.checkCancellation()
+            return AudioSamples(values: [0.1, -0.1])
+        } onCancel: {
+            Task { await cancellationObserved.open() }
+        }
+    }
+
+    func release(_ input: AudioInput) {
+        _ = input
+    }
+
+    func waitUntilAccessStarts() async {
+        await accessStarted.wait()
+    }
+
+    func waitUntilCancellationIsObserved() async {
+        await cancellationObserved.wait()
+    }
+
+    func allowAccessToTerminate() async {
+        await allowTermination.open()
+    }
+}
+
+private actor RecordingQwenCancellationRuntime: Qwen3ASRRuntimeServing {
+    private(set) var transcriptionCount = 0
+
+    func prepare(modelDirectory: URL) {
+        _ = modelDirectory
+    }
+
+    func transcribe(
+        samples: [Float],
+        language: Qwen3ASRLanguageMode,
+        sessionID: DictationSessionID
+    ) -> String {
+        _ = samples
+        _ = language
+        _ = sessionID
+        transcriptionCount += 1
+        return "unexpected"
+    }
+
+    func cancel(sessionID: DictationSessionID) {
+        _ = sessionID
     }
 }
 

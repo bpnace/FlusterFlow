@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Datum: 2026-07-16
+- Aktualisiert: 2026-09-08
 - Entscheider: freigegebener Ralplan-Konsens
 
 ## Kontext
@@ -13,10 +14,10 @@ Die App soll globales Push-to-talk, ein nicht aktivierendes Menüleisten-/Panel-
 1. Die App wird nativ in Swift 6 umgesetzt. SwiftUI besitzt App- und Settings-Szenen, AppKit den Menüleisten-Lebenszyklus und spätere nicht aktivierende Panels.
 2. Der Deployment Target ist macOS 15.0.
 3. Der App Sandbox Build-Schalter bleibt für den privaten V1-Build deaktiviert. Systemweite Accessibility- und Einfügungsintegration wird ausschließlich über dokumentierte macOS-APIs und explizite TCC-Freigaben umgesetzt.
-4. Hardened Runtime bleibt in Debug und Release aktiviert.
-5. Der stabile, originale Bundle Identifier lautet `com.flusterflow.private`. `WhisperFlow` ist nur der interne Modul- und Projektname.
-6. Der Bootstrap verwendet Ad-hoc-Signierung. Vor dem Daily-Driver-Gate wird auf diesem Mac einmalig eine lokale selbstsignierte Identität im Login-Keychain erstellt. Private Schlüssel, Zertifikatexporte und Credentials werden nie eingecheckt.
-7. Zusätzliche Entitlements werden nicht vorsorglich vergeben. Jede neue Berechtigung erfordert eine ADR-Aktualisierung und einen Privacy-/TCC-Review.
+4. Hardened Runtime ist für Release aktiviert. Debug verwendet keine Hardened Runtime und eine getrennte Bundle-ID, damit Entwicklungsfreigaben und die stabile Release-/TCC-Identität nicht vermischt werden.
+5. Der stabile Release Bundle Identifier lautet `com.flusterflow.private`; Debug verwendet `com.flusterflow.private.debug`. `WhisperFlow` ist nur der interne Modul- und Projektname.
+6. Der private Release-Build verwendet manuelles Code Signing mit der stabilen lokalen Identität `FlusterFlow Private Signing` aus dem dedizierten Keychain `FlusterFlowSigning.keychain-db`. Unsigned oder Ad-hoc-Builds sind ausschließlich lokale Debug-/CI-Overrides und keine Release- oder TCC-Evidenz. Private Schlüssel, Zertifikatexporte und Credentials werden nie eingecheckt.
+7. Das Entitlement bleibt auf `com.apple.security.device.audio-input` beschränkt. Jede weitere Berechtigung erfordert eine ADR-Aktualisierung und einen Privacy-/TCC-Review.
 
 ## Konsequenzen
 
@@ -30,14 +31,15 @@ Die App soll globales Push-to-talk, ein nicht aktivierendes Menüleisten-/Panel-
 
 - Ohne App Sandbox trägt die App selbst die Verantwortung für strikte Modul-, Daten- und Logging-Grenzen.
 - Accessibility ist eine mächtige Nutzerfreigabe und muss fail-closed behandelt werden.
-- Ad-hoc-Signierung beweist noch keine TCC-Kontinuität. Das spätere private Release-Gate benötigt zwei Builds mit derselben lokalen Identität und einen praktischen Permission-Smoke.
+- Eine gültige statische Signatur beweist noch keine TCC-Kontinuität. Das private Release-Gate benötigt zwei Builds mit derselben lokalen Identität und einen praktischen Permission-Smoke am tatsächlich installierten Artefakt.
 
 ## Verifikation
 
-- Xcode-Buildsettings: `MACOSX_DEPLOYMENT_TARGET = 15.0`, `SWIFT_VERSION = 6.0`, `SWIFT_STRICT_CONCURRENCY = complete`, `ENABLE_HARDENED_RUNTIME = YES`, `ENABLE_APP_SANDBOX = NO`.
-- Bundle-ID in Debug und Release: `com.flusterflow.private`.
-- Keine Entitlements-Datei im Bootstrap; damit existiert keine vorsorgliche Capability-Liste.
-- Vor dem privaten Release: `codesign -d --entitlements :-`, `codesign -d -r-` für zwei Release-Builds und dokumentierter Mikrofon-/Accessibility-TCC-Smoke.
+- Gemeinsame Xcode-Buildsettings: `MACOSX_DEPLOYMENT_TARGET = 15.0`, `SWIFT_VERSION = 6.0`, `SWIFT_STRICT_CONCURRENCY = complete`, `ENABLE_APP_SANDBOX = NO`.
+- Debug: `PRODUCT_BUNDLE_IDENTIFIER = com.flusterflow.private.debug` und `ENABLE_HARDENED_RUNTIME = NO`.
+- Release: `PRODUCT_BUNDLE_IDENTIFIER = com.flusterflow.private` und `ENABLE_HARDENED_RUNTIME = YES`.
+- `WhisperFlow/WhisperFlow.entitlements` enthält ausschließlich `com.apple.security.device.audio-input`.
+- Vor dem privaten Release: zwei manuell signierte Release-Builds aus dem dedizierten Keychain mit `codesign -d --entitlements :-` und `codesign -d -r-` verifizieren; danach genau eines dieser Artefakte atomar exportieren, über seinen CDHash unverändert mit dem Artifact-Modus des Installers installieren und ausschließlich daran den Mikrofon-/Accessibility-TCC-Smoke dokumentieren. Zwischen Verifikation, Installation und Smoke ist kein erneuter Build zulässig.
 
 ## Neuentscheidung erforderlich bei
 

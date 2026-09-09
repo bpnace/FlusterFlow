@@ -73,6 +73,7 @@ enum StopOutcome: Equatable, Sendable {
 
 enum CancelOutcome: Equatable, Sendable {
     case cancelled(DictationSessionID)
+    case failed(DictationSessionID, DictationFailure)
     case tooLateCommitted(DictationSessionID)
     case ignoredStale(DictationSessionID)
     case noActiveSession

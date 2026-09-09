@@ -1,6 +1,10 @@
 import Foundation
 
 actor DictationCoordinator {
+    private static let terminalHistoryWriteAttempts = 3
+    private static let terminalHistoryWriteRetryDelay = Duration.milliseconds(50)
+    private static let incrementalRecognitionStopGrace = Duration.seconds(1)
+
     private struct InsertionCancellationRequest: Sendable {
         let sessionID: DictationSessionID
         let task: Task<InsertionCancellationDisposition, Never>
@@ -16,6 +20,7 @@ actor DictationCoordinator {
     private let fallbackText: (any EphemeralTextPreserving)?
     private let recordingHistory: (any RecordingHistoryRecording)?
     private let prioritizedLexiconTerms: @Sendable (DictationLanguage) async -> [String]
+    private var recordingHistoryFailureHandler: (@Sendable (DictationSessionID) async -> Void)?
 
     private var nextSessionRawValue: UInt64 = 0
     private var phase: DictationPhase = .idle
@@ -55,6 +60,17 @@ actor DictationCoordinator {
         DictationSnapshot(phase: phase, activeSessionID: session?.id)
     }
 
+    func recordingStartDate(for sessionID: DictationSessionID) -> Date? {
+        guard session?.id == sessionID else { return nil }
+        return session?.recordingStartedAt
+    }
+
+    func setRecordingHistoryFailureHandler(
+        _ handler: (@Sendable (DictationSessionID) async -> Void)?
+    ) {
+        recordingHistoryFailureHandler = handler
+    }
+
     func start(language: DictationLanguage = .automatic) async -> StartOutcome {
         if !phase.canStart, let activeID = session?.id {
             return .alreadyActive(activeID)
@@ -66,6 +82,7 @@ actor DictationCoordinator {
         session = DictationSession(
             id: sessionID,
             language: language,
+            recordingStartedAt: nil,
             capturedTargetContext: nil,
             audioInput: nil,
             rawTranscript: nil,
@@ -89,6 +106,7 @@ actor DictationCoordinator {
         }
         session?.capturedTargetContext = capturedTarget
 
+        let requestedRecordingStartAt = Date()
         do {
             try await audioCapture.startCapture(for: sessionID)
         } catch {
@@ -99,6 +117,7 @@ actor DictationCoordinator {
             await audioCapture.cancelCapture(for: sessionID)
             return .ignoredStale(sessionID)
         }
+        session?.recordingStartedAt = requestedRecordingStartAt
 
         phase = .listening
         do {
@@ -154,10 +173,15 @@ actor DictationCoordinator {
                         continue
                     }
                     frameOffset = batch.nextFrameOffset
-                    try? await self.recordingHistory?.persistCheckpoint(
-                        batch.chunk,
-                        sessionID: sessionID
-                    )
+                    do {
+                        try await self.recordingHistory?.persistCheckpoint(
+                            batch.chunk,
+                            sessionID: sessionID
+                        )
+                    } catch {
+                        await self.reportRecordingHistoryFailure(sessionID)
+                        return
+                    }
                     if recognizerAcceptsStreaming {
                         do {
                             let disposition = try await lifecycle.updateRecognitionSession(
@@ -400,8 +424,10 @@ actor DictationCoordinator {
 
             switch await cancellationRequest.task.value {
             case .cancelledBeforeCommit:
-                await finalizeCancellationIfActive(sessionID)
-                return .cancelled(sessionID)
+                let historyPreserved = await finalizeCancellationIfActive(sessionID)
+                return historyPreserved
+                    ? .cancelled(sessionID)
+                    : .failed(sessionID, DictationFailure(stage: .audioFinalize))
             case .tooLateCommitted:
                 return .tooLateCommitted(sessionID)
             }
@@ -412,11 +438,17 @@ actor DictationCoordinator {
         phase = .cancelled
         _ = await insertion.requestCancellation(sessionID: sessionID)
         await fallbackText?.discardEphemeralText(sessionID: sessionID)
-        await recordingHistory?.discard(sessionID: sessionID)
+        await quiesceIncrementalRecognition(sessionID)
+        let historyPreserved = await interruptHistory(sessionID)
+        if !historyPreserved {
+            phase = .error(DictationFailure(stage: .audioFinalize))
+        }
         await releaseAudio(audio)
-        await releaseSessionResources(sessionID)
+        await releaseRemainingSessionResources(sessionID)
 
-        return .cancelled(sessionID)
+        return historyPreserved
+            ? .cancelled(sessionID)
+            : .failed(sessionID, DictationFailure(stage: .audioFinalize))
     }
 
     func resetTerminalState() {
@@ -465,7 +497,11 @@ actor DictationCoordinator {
         phase = .success
         session = nil
         await fallbackText?.discardEphemeralText(sessionID: sessionID)
-        await recordingHistory?.markFailed(sessionID: sessionID)
+        if !(await markHistoryFailed(sessionID)) {
+            phase = .error(DictationFailure(stage: .audioFinalize))
+            await releaseSessionResources(sessionID)
+            return .failed(sessionID, DictationFailure(stage: .audioFinalize))
+        }
         await releaseSessionResources(sessionID)
         return .noSpeech(sessionID)
     }
@@ -475,18 +511,24 @@ actor DictationCoordinator {
         await audioCapture.release(audio)
     }
 
+    @discardableResult
     private func finalizeCancellationIfActive(
         _ sessionID: DictationSessionID
-    ) async {
-        guard session?.id == sessionID else { return }
+    ) async -> Bool {
+        guard session?.id == sessionID else { return true }
 
         let audio = takeOwnedAudio(for: sessionID)
         session = nil
         phase = .cancelled
         await fallbackText?.discardEphemeralText(sessionID: sessionID)
-        await recordingHistory?.discard(sessionID: sessionID)
+        await quiesceIncrementalRecognition(sessionID)
+        let historyPreserved = await interruptHistory(sessionID)
+        if !historyPreserved {
+            phase = .error(DictationFailure(stage: .audioFinalize))
+        }
         await releaseAudio(audio)
-        await releaseSessionResources(sessionID)
+        await releaseRemainingSessionResources(sessionID)
+        return historyPreserved
     }
 
     private func pendingInsertionCancellationDisposition(
@@ -507,19 +549,57 @@ actor DictationCoordinator {
             return .ignoredStale(sessionID)
         }
 
-        let failure = DictationFailure(stage: stage)
+        var failure = DictationFailure(stage: stage)
         let audio = takeOwnedAudio(for: sessionID)
         session = nil
+        if !(await markHistoryFailed(sessionID)) {
+            failure = DictationFailure(stage: .audioFinalize)
+        }
         phase = .error(failure)
-        await recordingHistory?.markFailed(sessionID: sessionID)
         await releaseAudio(audio)
         await releaseSessionResources(sessionID)
         return .failed(sessionID, failure)
     }
 
+    private func interruptHistory(_ sessionID: DictationSessionID) async -> Bool {
+        guard let recordingHistory else { return true }
+        for attempt in 1...Self.terminalHistoryWriteAttempts {
+            do {
+                try await recordingHistory.interrupt(sessionID: sessionID)
+                return true
+            } catch {
+                guard attempt < Self.terminalHistoryWriteAttempts else { return false }
+                try? await Task.sleep(for: Self.terminalHistoryWriteRetryDelay)
+            }
+        }
+        return false
+    }
+
+    private func markHistoryFailed(_ sessionID: DictationSessionID) async -> Bool {
+        guard let recordingHistory else { return true }
+        for attempt in 1...Self.terminalHistoryWriteAttempts {
+            do {
+                try await recordingHistory.markFailed(sessionID: sessionID)
+                return true
+            } catch {
+                guard attempt < Self.terminalHistoryWriteAttempts else { return false }
+                try? await Task.sleep(for: Self.terminalHistoryWriteRetryDelay)
+            }
+        }
+        return false
+    }
+
     private func releaseSessionResources(_ sessionID: DictationSessionID) async {
+        await quiesceIncrementalRecognition(sessionID)
+        await releaseRemainingSessionResources(sessionID)
+    }
+
+    private func quiesceIncrementalRecognition(_ sessionID: DictationSessionID) async {
         await stopIncrementalRecognition(sessionID)
         incrementalRecognitionReceivedAudio.remove(sessionID)
+    }
+
+    private func releaseRemainingSessionResources(_ sessionID: DictationSessionID) async {
         contextEnrichmentTasks.removeValue(forKey: sessionID)?.cancel()
         async let cancelContext: Void = contextProvider.cancel(sessionID: sessionID)
         async let cancelAudio: Void = audioCapture.cancelCapture(for: sessionID)
@@ -561,12 +641,35 @@ actor DictationCoordinator {
         if let lifecycle = recognizer as? any SpeechRecognitionLifecycle {
             await lifecycle.stopRecognitionSession(sessionID: sessionID)
         }
-        await task.value
+        await waitForIncrementalRecognitionShutdown(task)
+    }
+
+    private func waitForIncrementalRecognitionShutdown(
+        _ task: Task<Void, Never>
+    ) async {
+        await withCheckedContinuation { continuation in
+            let result = OneShotVoidContinuation(continuation)
+            let timer = Task {
+                try? await Task.sleep(for: Self.incrementalRecognitionStopGrace)
+                guard !Task.isCancelled else { return }
+                await result.resume()
+            }
+            Task { await result.installTimer(timer) }
+            Task {
+                await task.value
+                await result.resume()
+            }
+        }
     }
 
     private func recordIncrementalRecognitionAudio(_ sessionID: DictationSessionID) {
         guard isCurrent(sessionID, expected: .listening) else { return }
         incrementalRecognitionReceivedAudio.insert(sessionID)
+    }
+
+    private func reportRecordingHistoryFailure(_ sessionID: DictationSessionID) async {
+        guard isCurrent(sessionID, expected: .listening) else { return }
+        await recordingHistoryFailureHandler?(sessionID)
     }
 
     private func shouldAttemptTranscription(_ audio: AudioInput) -> Bool {
@@ -799,6 +902,31 @@ actor DictationCoordinator {
         return regex.matches(in: text, range: range).compactMap { match in
             Range(match.range, in: text).map { String(text[$0]).lowercased() }
         }
+    }
+}
+
+private actor OneShotVoidContinuation {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var timer: Task<Void, Never>?
+
+    init(_ continuation: CheckedContinuation<Void, Never>) {
+        self.continuation = continuation
+    }
+
+    func installTimer(_ timer: Task<Void, Never>) {
+        guard continuation != nil else {
+            timer.cancel()
+            return
+        }
+        self.timer = timer
+    }
+
+    func resume() {
+        guard let continuation else { return }
+        self.continuation = nil
+        timer?.cancel()
+        timer = nil
+        continuation.resume()
     }
 }
 

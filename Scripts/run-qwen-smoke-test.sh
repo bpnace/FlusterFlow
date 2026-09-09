@@ -6,14 +6,14 @@ if [ "$#" -ne 1 ]; then
   exit 64
 fi
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
-
-AUDIO_PATH="$1"
-if [ ! -r "$AUDIO_PATH" ]; then
+if [ ! -r "$1" ]; then
   printf '%s\n' "The Qwen smoke-test audio file is not readable." >&2
   exit 66
 fi
+AUDIO_PATH="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 
 swift test list >/dev/null
 BIN_PATH="$(swift build --show-bin-path)"
