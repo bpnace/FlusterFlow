@@ -153,6 +153,8 @@ enum FlowBarWaveformGeometry {
 }
 
 enum RecordingTimerText {
+    static let accessibilityIdentifier = "flow-bar.recording-timer"
+
     static func elapsed(seconds: TimeInterval) -> String {
         format(max(0, seconds))
     }
@@ -161,10 +163,16 @@ enum RecordingTimerText {
         "noch \(format(max(0, seconds)))"
     }
 
+    static func display(elapsed seconds: TimeInterval) -> String {
+        seconds >= 105
+            ? remaining(seconds: 120 - seconds)
+            : elapsed(seconds: seconds)
+    }
+
     static func accessibilityValue(elapsed seconds: TimeInterval, handsFree: Bool) -> String {
         let time = seconds >= 105
-            ? "\(remaining(seconds: 120 - seconds)) verbleibend"
-            : "\(elapsed(seconds: seconds)) aufgenommen"
+            ? "\(display(elapsed: seconds)) verbleibend"
+            : "\(display(elapsed: seconds)) aufgenommen"
         return handsFree ? "Handsfree aktiv, \(time)" : time
     }
 
@@ -328,6 +336,7 @@ struct FlowBarView: View {
                             handsFree: handsFree
                         )
                     )
+                    .accessibilityIdentifier(RecordingTimerText.accessibilityIdentifier)
             }
         } else {
             statusContentBody(elapsed: nil)
@@ -352,14 +361,10 @@ struct FlowBarView: View {
                     .lineLimit(1)
 
                 if let elapsed {
-                    Text(
-                        elapsed >= 105
-                            ? RecordingTimerText.remaining(seconds: 120 - elapsed)
-                            : RecordingTimerText.elapsed(seconds: elapsed)
-                    )
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(elapsed >= 105 ? .orange : .white.opacity(0.72))
-                    .monospacedDigit()
+                    Text(RecordingTimerText.display(elapsed: elapsed))
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(elapsed >= 105 ? .orange : .white.opacity(0.72))
+                        .monospacedDigit()
                 }
 
                 if presentation == .listening, handsFree {

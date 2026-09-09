@@ -82,14 +82,35 @@ Diese lokale Verifikation ersetzt weder die GitHub-CI noch die noch offenen manu
 
 Die Identitätsumstellung ist eine bewusste lokale Breaking Change. Bestehende Einstellungen, Onboarding-Status, Kürzel und persönliche Lexikoneinträge aus der vorherigen Preferences-Domain werden nicht migriert, damit die frühere personenbezogene Kennung weder im Quellcode noch in der Repository-Historie fortgeführt wird. Der Nutzer muss diese Einstellungen und die macOS-Berechtigungen einmalig neu setzen. Die lokal gespeicherte Aufnahmehistorie und lokale Modelle bleiben erhalten, weil ihre Speicherorte nicht von der Bundle-ID abhängen.
 
+## Installierter Smoke mit neutraler Identität am 9. September 2026
+
+Die folgenden Laufzeitprüfungen gelten für die lokal installierte App mit Bundle-ID `com.flusterflow.private`, Version 0.3.0, Build 17 und CDHash `1696D67F7056DC422B273B80A03A711A7481E4F8`. Sie enthalten keine Transkriptinhalte, Aufnahme-IDs, Gerätebezeichnungen oder Audio-Hashes. Die Prüfungen belegen dieses installierte Artefakt; die Commit-Bindung und GitHub-CI müssen nach dem finalen Commit erneut hergestellt werden.
+
+| Prüfung | Ergebnis |
+| --- | --- |
+| Physischer Handsfree-Happy-Path | PASS, 6,5 Sekunden echte Mikrofoneingabe, Status `completed`, gültiges nichtleeres Audio, genau eine Transkriptversion und bestätigte Einfügung in TextEdit |
+| Crash-Wiederherstellung | PASS, laufende Aufnahme nach einem erzwungenen Prozessabbruch beim Neustart als `interrupted` wiederhergestellt; checkpoint-gesichertes Audio blieb vorhanden |
+| Retry der wiederhergestellten Aufnahme | PASS, dieselbe Aufnahme lokal erneut transkribiert; Status anschließend `completed`, Audio unverändert, Zwischenablage und vorhandenes TextEdit-Dokument unverändert |
+| Erneute Transkription mit anderem Modell | PASS, zu einer bereits abgeschlossenen realen Aufnahme wurde mit Parakeet genau Version 2 ergänzt; Version 1 und Audio blieben erhalten, keine automatische Einfügung und keine Zwischenablageänderung |
+| 120-Sekunden-Grenze | PASS, echte Audioeingabe wurde nach 119,2 Sekunden automatisch genau einmal finalisiert; genau ein History-Eintrag mit Audio und genau einer Transkriptversion, keine Zwischenablageänderung |
+| Countdown-Vertrag | PASS auf dem installierten Artefakt: Der Flow-Bar-Knoten wurde über `flow-bar.recording-timer` gefunden, sein macOS-Wert `AXValueDescription` wechselte nach 105 Sekunden zu `noch MM:SS verbleibend`, und ein eng auf die Flow Bar zugeschnittener Screenshot bestätigte den sichtbaren orangenen Countdown. Der Screenshot wurde nach der Sichtprüfung gelöscht. |
+| Failure-zu-Retry-Regression | PASS, Produktionskomponenten für Store, Recorder, Audio-Ownership, Recognizer-Router und History-ViewModel bewahren beim Erkennungsfehler denselben Eintrag und dasselbe Audio; der anschließende Retry endet ohne Buffer- oder Lease-Restzustand in `completed` |
+| Vollständige Xcode-Tests des finalen Arbeitsstands | PASS, 395 Tests, 14 erwartete opt-in Smokes übersprungen, 0 Fehler |
+| SwiftPM-Tests des finalen Arbeitsstands | PASS, 426 Tests, 14 erwartete opt-in Smokes übersprungen, 0 Fehler |
+| Capped App-Tests des finalen Arbeitsstands | PASS, 180 von maximal 180 Tests, 0 Fehler; der neue Version-2-Regressionsfall ist im Capped-Plan enthalten |
+| Build und lokale CI-Grenzen des finalen Arbeitsstands | PASS, unsigned Debug-Build, Artefaktketten-Vertrag, Netzwerk-Boundary, Target-Harness und Local-Privacy-Harness; Signing-Prerequisite erwartungsgemäß mit `identity_required` blockiert |
+
+Die ausschließlich für Crash- und Langzeittest angelegten History-Einträge sowie das dafür erzeugte TextEdit-Testdokument wurden anschließend gezielt in den Papierkorb verschoben. Die bereits vorhandene reale Aufnahme mit der additiv erzeugten zweiten Transkriptversion blieb unangetastet.
+
 ## Manuelle Prüfung auf dem Ziel-Mac
 
 - Push-to-talk starten, halten und durch Loslassen beenden; bisheriges Verhalten muss unverändert bleiben.
 - Handsfree aktivieren, durch Doppeltipp starten und durch einen weiteren Tastendruck beenden.
 - Escape/Abbruch während Handsfree prüfen; es darf keine späte Transkription oder Einfügung folgen.
-- 120 Sekunden aufnehmen und bestätigen, dass der Präfix automatisch genau einmal finalisiert und in der Historie erhalten wird.
-- Einen lokalen ASR-Fehler provozieren und bestätigen, dass Audio und Fehlerstatus erhalten bleiben.
-- Dieselbe Aufnahme mit einem anderen lokalen Modell erneut transkribieren; beide Transcript-Versionen müssen erhalten bleiben.
+- [x] 120 Sekunden aufnehmen und bestätigen, dass der Präfix automatisch genau einmal finalisiert und in der Historie erhalten wird.
+- [x] Eine laufende Aufnahme durch einen Prozessabbruch unterbrechen und bestätigen, dass checkpoint-gesichertes Audio und Unterbrechungsstatus nach dem Neustart erhalten bleiben und ein lokaler Retry gelingt.
+- [x] Dieselbe Aufnahme mit einem anderen lokalen Modell erneut transkribieren; beide Transcript-Versionen müssen erhalten bleiben.
+- [ ] Einen echten lokalen ASR-Fehler provozieren und bestätigen, dass Audio und Fehlerstatus erhalten bleiben. Der automatisierte Produktionskomponenten-Durchstich für Fehler, Persistenz und erfolgreichen Retry besteht; der installierte Modellruntime-Negativtest bleibt separat offen.
 - Während History-Retry Netzwerkaktivität, Zielkontext und automatische Einfügung ausschließen.
 - Einzelnes Löschen und „Alle löschen“ jeweils mit sichtbarer Bestätigung prüfen.
 - Lokal signierten Release-Build zweimal prüfen und dabei mit `Scripts/verify-private-signing.sh --identity '<40-hex-fingerprint>' --export-app "$VERIFIED_ROOT/FlusterFlow.app"` genau eines dieser geprüften Artefakte exportieren. Den inhaltsfreien `cdHash` aus der JSON-Ausgabe anschließend unverändert an `Scripts/build-install-private.sh --verified-app "$VERIFIED_ROOT/FlusterFlow.app" --expected-cdhash '<cdHash>'` übergeben. Mikrofon-/Accessibility-TCC-Kontinuität ausschließlich an diesem installierten Artefakt testen; kein erneuter Build zwischen Verifikation und Smoke.

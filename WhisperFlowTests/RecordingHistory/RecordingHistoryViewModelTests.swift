@@ -38,6 +38,155 @@ final class RecordingHistoryViewModelTests: XCTestCase {
         XCTAssertEqual(transcriptionCount, 1)
     }
 
+    func testRetranscribingCompletedEntryWithDifferentModelAppendsSecondVersion() async throws {
+        let fixture = try await makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let existingEntries = try await fixture.store.list()
+        let existingEntry = try XCTUnwrap(existingEntries.first)
+        try await fixture.store.appendTranscript(
+            TranscriptVersion(
+                backend: RecognitionBackend.whisperKitLargeV3Turbo.rawValue,
+                language: .german,
+                text: "Erste Transkription"
+            ),
+            to: existingEntry.id
+        )
+        let backend = HistorySuccessSpeechRecognizer()
+        let originalAudio = try await fixture.store.loadAudio(for: existingEntry.id)
+        let recognizer = SessionModelSpeechRecognizer(
+            recognizers: [.parakeetV3Int8: backend]
+        )
+        let viewModel = RecordingHistoryViewModel(
+            store: fixture.store,
+            audioSamples: AudioBufferStore(),
+            recognizer: recognizer,
+            modelReadiness: RecordingHistoryModelReadinessProvider {
+                $0 == .parakeetV3Int8
+            }
+        )
+
+        await viewModel.reloadEntries()
+        viewModel.selectedModel = .parakeetV3Int8
+        await viewModel.performSelectedRetranscription()
+
+        let entries = try await fixture.store.list()
+        let entry = try XCTUnwrap(entries.first)
+        let persistedAudio = try await fixture.store.loadAudio(for: existingEntry.id)
+        XCTAssertEqual(entry.state, .completed)
+        XCTAssertEqual(persistedAudio, originalAudio)
+        XCTAssertEqual(entry.transcripts.map(\.version), [1, 2])
+        XCTAssertEqual(
+            entry.transcripts.map(\.backend),
+            [
+                RecognitionBackend.whisperKitLargeV3Turbo.rawValue,
+                RecognitionBackend.parakeetV3Int8.rawValue,
+            ]
+        )
+        XCTAssertEqual(
+            entry.transcripts.map(\.text),
+            ["Erste Transkription", "Erneut transkribiert"]
+        )
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertFalse(viewModel.isWorking)
+        let transcriptionCount = await backend.transcriptionCount()
+        XCTAssertEqual(transcriptionCount, 1)
+    }
+
+    func testPersistedRecognitionFailureCanRetrySameRecordingWithoutLeakingState() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = RecordingHistoryStore(rootURL: root)
+        let liveAudioSamples = AudioBufferStore()
+        let recorder = RecordingHistoryRecorder(
+            store: store,
+            sampleAccess: liveAudioSamples
+        )
+        let backend = HistoryFailOnceSpeechRecognizer()
+        let recognizer = SessionModelSpeechRecognizer(
+            recognizers: [.parakeetV3Int8: backend]
+        )
+        let liveSessionID = DictationSessionID(rawValue: 700)
+        let originalAudio = AudioSamples(
+            values: [0.25, -0.25, 0.5, -0.5],
+            sampleRate: 16_000
+        )
+        let liveInput = await liveAudioSamples.store(originalAudio)
+
+        try await recorder.begin(sessionID: liveSessionID, language: .german)
+        let initialEntries = try await store.list()
+        let originalEntry = try XCTUnwrap(initialEntries.first)
+        try await recorder.persistAudio(liveInput, sessionID: liveSessionID)
+        await recognizer.register(.parakeetV3Int8, for: liveSessionID)
+        do {
+            _ = try await recognizer.transcribe(
+                liveInput,
+                hints: RecognitionHints(
+                    language: .german,
+                    terms: [],
+                    prioritizedLexiconTerms: []
+                ),
+                sessionID: liveSessionID
+            )
+            XCTFail("Expected the initial recognition to fail")
+        } catch is HistoryForcedRecognitionFailure {
+            try await recorder.markFailed(sessionID: liveSessionID)
+        }
+        await recognizer.cancel(sessionID: liveSessionID)
+        await liveAudioSamples.release(liveInput)
+
+        let failedEntries = try await store.list()
+        let failedEntry = try XCTUnwrap(failedEntries.first)
+        let failedAudio = try await store.loadAudio(for: originalEntry.id)
+        let liveBufferCount = await liveAudioSamples.storedBufferCount()
+        XCTAssertEqual(failedEntries.count, 1)
+        XCTAssertEqual(failedEntry.id, originalEntry.id)
+        XCTAssertEqual(failedEntry.state, .failed)
+        XCTAssertTrue(failedEntry.transcripts.isEmpty)
+        XCTAssertEqual(failedAudio, originalAudio)
+        XCTAssertEqual(liveBufferCount, 0)
+
+        let retryAudioSamples = AudioBufferStore()
+        let viewModel = RecordingHistoryViewModel(
+            store: store,
+            audioSamples: retryAudioSamples,
+            recognizer: recognizer,
+            modelReadiness: RecordingHistoryModelReadinessProvider {
+                $0 == .parakeetV3Int8
+            }
+        )
+        await viewModel.reloadEntries()
+        viewModel.selectedModel = .parakeetV3Int8
+
+        await viewModel.performSelectedRetranscription()
+
+        let completedEntries = try await store.list()
+        let completedEntry = try XCTUnwrap(completedEntries.first)
+        let completedAudio = try await store.loadAudio(for: originalEntry.id)
+        let retryBufferCount = await retryAudioSamples.storedBufferCount()
+        let transcriptionCount = await backend.transcriptionCount()
+        XCTAssertEqual(completedEntries.count, 1)
+        XCTAssertEqual(completedEntry.id, originalEntry.id)
+        XCTAssertEqual(completedEntry.state, .completed)
+        XCTAssertEqual(completedAudio, originalAudio)
+        XCTAssertEqual(completedEntry.transcripts.map(\.version), [1])
+        XCTAssertEqual(
+            completedEntry.transcripts.map(\.backend),
+            [RecognitionBackend.parakeetV3Int8.rawValue]
+        )
+        XCTAssertFalse(completedEntry.transcripts[0].text.isEmpty)
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertFalse(viewModel.isWorking)
+        XCTAssertEqual(retryBufferCount, 0)
+        XCTAssertEqual(transcriptionCount, 2)
+
+        let leaseProbe = DictationSessionID(rawValue: 701)
+        try await recognizer.acquireExclusiveAccess(
+            for: leaseProbe,
+            purpose: .historyRetranscription
+        )
+        await recognizer.releaseExclusiveAccess(for: leaseProbe)
+    }
+
     func testUnavailableModelIsRejectedBeforeHistoryEntryChangesState() async throws {
         let fixture = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -445,6 +594,37 @@ private actor HistorySuccessSpeechRecognizer: SpeechRecognizing {
         count += 1
         return RawTranscript(
             text: "Erneut transkribiert",
+            language: .german,
+            backend: .parakeetV3Int8
+        )
+    }
+
+    func cancel(sessionID: DictationSessionID) async {
+        _ = sessionID
+    }
+
+    func transcriptionCount() -> Int { count }
+}
+
+private struct HistoryForcedRecognitionFailure: Error {}
+
+private actor HistoryFailOnceSpeechRecognizer: SpeechRecognizing {
+    private var count = 0
+
+    func transcribe(
+        _ audio: AudioInput,
+        hints: RecognitionHints,
+        sessionID: DictationSessionID
+    ) async throws -> RawTranscript {
+        _ = audio
+        _ = hints
+        _ = sessionID
+        count += 1
+        if count == 1 {
+            throw HistoryForcedRecognitionFailure()
+        }
+        return RawTranscript(
+            text: "Erfolgreich wiederholt",
             language: .german,
             backend: .parakeetV3Int8
         )

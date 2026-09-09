@@ -504,6 +504,14 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(RecordingTimerText.elapsed(seconds: 65), "01:05")
         XCTAssertEqual(RecordingTimerText.remaining(seconds: 15), "noch 00:15")
         XCTAssertEqual(RecordingTimerText.remaining(seconds: -1), "noch 00:00")
+        XCTAssertEqual(RecordingTimerText.display(elapsed: 104.999), "01:44")
+        XCTAssertEqual(RecordingTimerText.display(elapsed: 105), "noch 00:15")
+        XCTAssertEqual(RecordingTimerText.display(elapsed: 120), "noch 00:00")
+        XCTAssertEqual(RecordingTimerText.display(elapsed: 121), "noch 00:00")
+        XCTAssertEqual(
+            RecordingTimerText.accessibilityIdentifier,
+            "flow-bar.recording-timer"
+        )
         XCTAssertEqual(
             RecordingTimerText.accessibilityValue(elapsed: 65, handsFree: false),
             "01:05 aufgenommen"
