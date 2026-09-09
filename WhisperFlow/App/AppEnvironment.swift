@@ -1,6 +1,7 @@
 import Combine
 import Dispatch
 import Foundation
+import SwiftUI
 
 enum RecordingDeadline {
     static func remainingDuration(
@@ -44,6 +45,31 @@ struct DictationCapabilityStatus: Equatable, Sendable {
     private var modelIsReady: Bool {
         if case .ready = model { return true }
         return false
+    }
+}
+
+struct DictationOperationalStatus: Equatable, Sendable {
+    let capability: DictationCapabilityStatus
+    let pushToTalkEnabled: Bool
+    let pushToTalkRegistrationStatus: PushToTalkRegistrationStatus
+
+    var canStartDictation: Bool {
+        capability.canStartLocalDictation
+            && pushToTalkEnabled
+            && pushToTalkRegistrationStatus == .registered
+    }
+
+    func statusTitle(shortcut: String) -> String {
+        guard pushToTalkEnabled else {
+            return "Push-to-talk deaktiviert"
+        }
+        guard pushToTalkRegistrationStatus == .registered else {
+            return pushToTalkRegistrationStatus.title
+        }
+        guard capability.canStartLocalDictation else {
+            return capability.statusTitle(shortcut: shortcut)
+        }
+        return "Bereit · \(shortcut) halten"
     }
 }
 
@@ -118,25 +144,45 @@ final class AppEnvironment {
     private let flowBar = FlowBarController()
     private let diagnosticsViewModel: DiagnosticsViewModel
 
-    private lazy var settingsWindow = SettingsWindowController(
-        store: settings,
-        permissions: permissions,
-        apiKey: apiKeySettings,
-        model: modelProvisioning,
-        diagnostics: diagnosticsViewModel,
-        lexicon: personalLexicon
-    )
-    private lazy var onboardingWindow = OnboardingWindowController(
-        store: settings,
-        permissions: permissions,
-        model: modelProvisioning
-    )
-    private lazy var historyWindow = RecordingHistoryWindowController(
-        store: recordingHistory,
-        audioSamples: audioSamples,
-        recognizer: speechRecognizer,
-        modelReadiness: historyModelReadiness
-    )
+    private lazy var appWindow: AppWindowController = {
+        let historyViewModel = RecordingHistoryViewModel(
+            store: recordingHistory,
+            audioSamples: audioSamples,
+            recognizer: speechRecognizer,
+            modelReadiness: historyModelReadiness
+        )
+        return AppWindowController(
+            overview: AnyView(
+                AppOverviewView(
+                    store: settings,
+                    permissions: permissions,
+                    model: modelProvisioning,
+                    finish: { [weak self] in self?.completeOnboarding() }
+                )
+            ),
+            recordingHistoryViewModel: historyViewModel,
+            settingsView: { [
+                settings,
+                permissions,
+                apiKeySettings,
+                modelProvisioning,
+                diagnosticsViewModel,
+                personalLexicon
+            ] destination in
+                AnyView(
+                    LocalSettingsView(
+                        destination: destination,
+                        store: settings,
+                        permissions: permissions,
+                        apiKey: apiKeySettings,
+                        model: modelProvisioning,
+                        diagnostics: diagnosticsViewModel,
+                        lexicon: personalLexicon
+                    )
+                )
+            }
+        )
+    }()
 
     private var activeSessionID: DictationSessionID?
     private var operationTask: Task<Void, Never>?
@@ -153,11 +199,13 @@ final class AppEnvironment {
     private var isHotKeyRegistered = false
     private var errorTerminalSessionID: DictationSessionID?
     private var capabilitySubscriptions: Set<AnyCancellable> = []
+    private var onboardingReadinessObservation: AnyCancellable?
     private var largeIdleUnloadTask: Task<Void, Never>?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var nextMaintenanceSessionRawValue = UInt64.max
     private let recordingHistoryRecoveryTask: Task<Void, Never>
     private var recordingHistorySetupTask: Task<Void, Never>?
+    private var recordingHistoryPresentationTask: Task<Void, Never>?
 
     var onCancellationAvailabilityChanged: ((Bool) -> Void)?
     var onCapabilityStatusChanged: (() -> Void)?
@@ -363,16 +411,10 @@ final class AppEnvironment {
     var shortcutTitle: String { settings.shortcut.title }
 
     var serviceStatusTitle: String {
-        guard settings.pushToTalkEnabled else {
-            return "Push-to-talk deaktiviert"
-        }
         guard !settings.isShortcutCaptureActive else {
             return "Tastenkürzel wird aufgenommen …"
         }
-        guard isHotKeyRegistered else {
-            return settings.pushToTalkRegistrationStatus.title
-        }
-        return capabilityStatus.statusTitle(shortcut: shortcutTitle)
+        return operationalStatus.statusTitle(shortcut: shortcutTitle)
     }
 
     var capabilityStatus: DictationCapabilityStatus {
@@ -380,6 +422,14 @@ final class AppEnvironment {
             microphone: permissions.microphone,
             accessibility: permissions.accessibility,
             model: modelProvisioning.status
+        )
+    }
+
+    var operationalStatus: DictationOperationalStatus {
+        DictationOperationalStatus(
+            capability: capabilityStatus,
+            pushToTalkEnabled: settings.pushToTalkEnabled,
+            pushToTalkRegistrationStatus: settings.pushToTalkRegistrationStatus
         )
     }
 
@@ -401,6 +451,8 @@ final class AppEnvironment {
     }
 
     func shutdown() {
+        onboardingReadinessObservation?.cancel()
+        onboardingReadinessObservation = nil
         hotKey.unregister()
         isHotKeyRegistered = false
         operationTask?.cancel()
@@ -408,11 +460,13 @@ final class AppEnvironment {
         largeIdleUnloadTask?.cancel()
         pendingPushToTalkStopTask?.cancel()
         automaticFinalizationTask?.cancel()
+        recordingHistoryPresentationTask?.cancel()
         operationTask = nil
         cancellationTask = nil
         largeIdleUnloadTask = nil
         pendingPushToTalkStopTask = nil
         automaticFinalizationTask = nil
+        recordingHistoryPresentationTask = nil
         memoryPressureSource?.cancel()
         memoryPressureSource = nil
         let knownSessionID = activeSessionID
@@ -444,20 +498,59 @@ final class AppEnvironment {
         modelProvisioning.refresh()
     }
 
+    func presentApp() {
+        cancelPendingRecordingHistoryPresentation()
+        appWindow.present(.overview)
+    }
+
     func presentSettings() {
-        settingsWindow.present()
+        cancelPendingRecordingHistoryPresentation()
+        appWindow.presentSettings()
     }
 
     func presentRecordingHistory() {
-        Task { @MainActor [weak self] in
+        recordingHistoryPresentationTask?.cancel()
+        appWindow.present(.recordings)
+        recordingHistoryPresentationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             await recordingHistoryRecoveryTask.value
-            historyWindow.present()
+            guard !Task.isCancelled else { return }
+            appWindow.refreshRecordingsIfSelected()
+            recordingHistoryPresentationTask = nil
         }
     }
 
     func presentOnboardingIfNeeded() {
-        onboardingWindow.presentIfNeeded()
+        permissions.refresh()
+        modelProvisioning.refresh()
+        onboardingReadinessObservation?.cancel()
+        guard settings.onboardingCompleted else {
+            presentApp()
+            return
+        }
+
+        onboardingReadinessObservation = modelProvisioning.$activity
+            .filter { $0 != .checking }
+            .first()
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, !self.operationalStatus.canStartDictation else { return }
+                    self.presentApp()
+                }
+            }
+    }
+
+    private func completeOnboarding() {
+        guard operationalStatus.canStartDictation else { return }
+        onboardingReadinessObservation?.cancel()
+        onboardingReadinessObservation = nil
+        settings.onboardingCompleted = true
+        appWindow.present(.overview)
+    }
+
+    private func cancelPendingRecordingHistoryPresentation() {
+        recordingHistoryPresentationTask?.cancel()
+        recordingHistoryPresentationTask = nil
     }
 
     func cancelActiveSession() {

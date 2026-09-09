@@ -51,16 +51,67 @@ final class AppCompositionIntegrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(ApplicationRuntime.isRunningTests(environment: [:]))
     }
 
-    func testStandardAppSettingsCommandRoutesToCustomSettingsWindow() throws {
+    func testStandardAppSettingsCommandRoutesToUnifiedAppWindow() throws {
         let appSource = try repositorySource("WhisperFlow/App/WhisperFlowApp.swift")
         let delegateSource = try repositorySource("WhisperFlow/App/AppDelegate.swift")
+        let environmentSource = try repositorySource("WhisperFlow/App/AppEnvironment.swift")
 
         XCTAssertTrue(appSource.contains("CommandGroup(replacing: .appSettings)"))
         XCTAssertTrue(appSource.contains("appDelegate.presentSettings()"))
         XCTAssertTrue(delegateSource.contains("func presentSettings()"))
         XCTAssertTrue(delegateSource.contains("environment.presentSettings()"))
-        XCTAssertTrue(delegateSource.contains("func applicationShouldHandleReopen("))
-        XCTAssertTrue(delegateSource.contains("presentSettings()\n        return true"))
+        XCTAssertTrue(environmentSource.contains("appWindow.presentSettings()"))
+        XCTAssertTrue(environmentSource.contains("appWindow.present(.recordings)"))
+    }
+
+    func testApplicationReopenRoutesToOverviewInsteadOfSettings() throws {
+        let delegateSource = try repositorySource("WhisperFlow/App/AppDelegate.swift")
+        let functionStart = try XCTUnwrap(
+            delegateSource.range(of: "func applicationShouldHandleReopen(")
+        )
+        let functionEnd = try XCTUnwrap(
+            delegateSource.range(
+                of: "func applicationWillTerminate(",
+                range: functionStart.upperBound..<delegateSource.endIndex
+            )
+        )
+        let function = String(
+            delegateSource[functionStart.lowerBound..<functionEnd.lowerBound]
+        )
+
+        XCTAssertTrue(function.contains("environment.presentApp()"))
+        XCTAssertFalse(function.contains("presentSettings()"))
+    }
+
+    func testProductionCompositionOwnsOnlyTheUnifiedPrimaryWindowController() throws {
+        let sourceRoot = try TestResourceLoader.url("WhisperFlow")
+        let enumerator = FileManager.default.enumerator(
+            at: sourceRoot,
+            includingPropertiesForKeys: nil
+        )
+        let combined = try (enumerator?.allObjects as? [URL] ?? [])
+            .filter { $0.pathExtension == "swift" }
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n")
+
+        XCTAssertTrue(combined.contains("final class AppWindowController"))
+        XCTAssertFalse(combined.contains("final class SettingsWindowController"))
+        XCTAssertFalse(combined.contains("final class RecordingHistoryWindowController"))
+        XCTAssertFalse(combined.contains("final class OnboardingWindowController"))
+    }
+
+    func testOverviewIsCompactAndDoesNotDuplicateItsSidebarTitle() throws {
+        let source = try repositorySource(
+            "WhisperFlow/Features/Onboarding/AppOverviewView.swift"
+        )
+
+        XCTAssertFalse(source.contains("Text(\"Übersicht\")"))
+        XCTAssertFalse(
+            source.contains("Bereitschaft und lokale Verarbeitung auf einen Blick")
+        )
+        XCTAssertTrue(source.contains("ViewThatFits(in: .vertical)"))
+        XCTAssertTrue(source.contains("ScrollView"))
+        XCTAssertTrue(source.contains(".padding(.vertical, 20)"))
     }
 
     func testLocalPipelineExtractsTermsCorrectsCleanupAndPreservesSafeFallback() async throws {
@@ -309,9 +360,10 @@ final class AppCompositionIntegrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(composition.contains("ModelProvisioningService"))
     }
 
-    func testOnboardingDisclosesLocalRecordingHistory() throws {
-        XCTAssertTrue(OnboardingPrivacyCopy.localHistory.contains("Lokal löschbare Aufnahmehistorie"))
-        XCTAssertFalse(OnboardingPrivacyCopy.localHistory.contains("Keine Aufnahmehistorie"))
+    func testOverviewDisclosesLocalRecordingHistory() throws {
+        let privacyCopy = AppOverviewPrivacyCopy.localHistory(cloudEnabled: false)
+        XCTAssertTrue(privacyCopy.contains("Lokal löschbare Aufnahmehistorie"))
+        XCTAssertFalse(privacyCopy.contains("Keine Aufnahmehistorie"))
     }
 
     func testProtectedContentIsCheckedAtCaptureAndRevalidatedBeforeInsertion() throws {

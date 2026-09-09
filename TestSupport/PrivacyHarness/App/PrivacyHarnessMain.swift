@@ -169,12 +169,10 @@ private struct DynamicPrivacyRunner {
         )
         var leaks = networkLeaks
         var scanError: CanaryScanError?
-        for canary in canaries.values where scanError == nil {
-            do {
-                leaks.append(contentsOf: try CanaryLeakScanner().scan(canary: canary, roots: roots))
-            } catch let error as CanaryScanError {
-                scanError = error
-            }
+        do {
+            leaks.append(contentsOf: try CanaryLeakScanner().scan(canaries: canaries.values, roots: roots))
+        } catch let error as CanaryScanError {
+            scanError = error
         }
 
         let unifiedLogData = try copyUnifiedLog(processIdentifier: rootPID)

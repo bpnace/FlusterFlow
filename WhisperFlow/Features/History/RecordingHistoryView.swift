@@ -253,93 +253,73 @@ final class RecordingHistoryViewModel: ObservableObject {
     }
 }
 
-@MainActor
-final class RecordingHistoryWindowController: NSWindowController {
-    private let viewModel: RecordingHistoryViewModel
-
-    init(
-        store: RecordingHistoryStore,
-        audioSamples: AudioBufferStore,
-        recognizer: SessionModelSpeechRecognizer,
-        modelReadiness: any RecordingHistoryModelReadinessProviding
-    ) {
-        viewModel = RecordingHistoryViewModel(
-            store: store,
-            audioSamples: audioSamples,
-            recognizer: recognizer,
-            modelReadiness: modelReadiness
-        )
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "FlusterFlow Aufnahmen"
-        window.contentView = NSHostingView(rootView: RecordingHistoryView(model: viewModel))
-        window.center()
-        window.isReleasedWhenClosed = false
-        super.init(window: window)
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    func present() {
-        viewModel.reload()
-        showWindow(nil)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
-    }
-}
-
-private struct RecordingHistoryView: View {
+struct RecordingHistoryView: View {
     @ObservedObject var model: RecordingHistoryViewModel
     @State private var confirmsDeleteSelected = false
     @State private var confirmsDeleteAll = false
 
     var body: some View {
-        NavigationSplitView {
-            List(model.entries, selection: $model.selectedID) { entry in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(entry.createdAt, format: .dateTime.day().month().year().hour().minute())
-                        .font(.headline)
-                    Text(summary(for: entry))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .tag(entry.id)
+        VStack(spacing: 0) {
+            ViewThatFits(in: .horizontal) {
+                historyHeader(horizontal: true)
+                historyHeader(horizontal: false)
             }
-            .navigationTitle("Aufnahmen")
-        } detail: {
-            if let entry = model.selectedEntry {
-                detail(entry)
-            } else {
-                VStack(spacing: 16) {
-                    ContentUnavailableView(
-                        "Keine Aufnahme ausgewählt",
-                        systemImage: "waveform"
-                    )
-                    if let error = model.errorMessage {
-                        Label(error, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+
+            Divider()
+
+            HSplitView {
+                List(model.entries, selection: $model.selectedID) { entry in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(entry.createdAt, format: .dateTime.day().month().year().hour().minute())
+                            .font(.headline)
+                        Text(summary(for: entry))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .tag(entry.id)
+                }
+                .frame(minWidth: 220, idealWidth: 260, maxWidth: 310)
+                .scrollContentBackground(.hidden)
+                .background(CoralEclipseStyle.sidebar)
+
+                Group {
+                    if let entry = model.selectedEntry {
+                        detail(entry)
+                    } else {
+                        VStack(spacing: 16) {
+                            ContentUnavailableView(
+                                model.entries.isEmpty
+                                    ? "Noch keine Aufnahmen"
+                                    : "Keine Aufnahme ausgewählt",
+                                systemImage: "waveform",
+                                description: Text(
+                                    model.entries.isEmpty
+                                        ? "Neue Diktate erscheinen hier lokal und bleiben bis zum ausdrücklichen Löschen erhalten."
+                                        : "Wähle links eine Aufnahme aus, um ihre Transkriptversionen zu sehen."
+                                )
+                            )
+                            if let error = model.errorMessage {
+                                Label(error, systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .padding(.horizontal)
+                            }
+                        }
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(CoralEclipseStyle.canvas)
             }
         }
-        .frame(minWidth: 720, minHeight: 480)
-        .toolbar {
-            Button("Aktualisieren", systemImage: "arrow.clockwise") { model.reload() }
-                .disabled(model.isWorking)
-            Button("Alle löschen", role: .destructive) { confirmsDeleteAll = true }
-                .disabled(!model.canDeleteAll)
-        }
+        .background(CoralEclipseStyle.canvas)
         .confirmationDialog(
             "Gesamte lokale Aufnahmehistorie löschen?",
             isPresented: $confirmsDeleteAll,
             titleVisibility: .visible
         ) {
             Button("Alle Aufnahmen endgültig löschen", role: .destructive) { model.deleteAll() }
+                .tint(.red)
         } message: {
             Text("Audio und alle Transkriptversionen werden von diesem Mac entfernt.")
         }
@@ -349,44 +329,56 @@ private struct RecordingHistoryView: View {
             titleVisibility: .visible
         ) {
             Button("Aufnahme endgültig löschen", role: .destructive) { model.deleteSelected() }
+                .tint(.red)
         } message: {
             Text("Audio und alle zugehörigen Transkriptversionen werden entfernt.")
         }
     }
 
+    @ViewBuilder
+    private func historyHeader(horizontal: Bool) -> some View {
+        if horizontal {
+            HStack(alignment: .center, spacing: 16) {
+                historyIdentity
+                Spacer()
+                Button("Aktualisieren", systemImage: "arrow.clockwise") { model.reload() }
+                    .disabled(model.isWorking)
+                Button("Alle löschen", role: .destructive) { confirmsDeleteAll = true }
+                    .disabled(!model.canDeleteAll)
+                    .tint(.red)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                historyIdentity
+                HStack {
+                    Button("Aktualisieren", systemImage: "arrow.clockwise") { model.reload() }
+                        .disabled(model.isWorking)
+                    Button("Alle löschen", role: .destructive) { confirmsDeleteAll = true }
+                        .disabled(!model.canDeleteAll)
+                        .tint(.red)
+                }
+            }
+        }
+    }
+
+    private var historyIdentity: some View {
+        CoralPageHeader(
+            title: "Aufnahmen",
+            subtitle: "Lokal gespeichert, wiederherstellbar und versioniert",
+            systemImage: AppDestination.recordings.systemImage
+        )
+    }
+
     private func detail(_ entry: RecordingHistoryEntry) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(entry.createdAt, format: .dateTime.weekday().day().month().year().hour().minute())
-                        .font(.title2.bold())
-                    Text(summary(for: entry)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Löschen", role: .destructive) { confirmsDeleteSelected = true }
-                    .disabled(
-                        entry.state == .recording
-                            || entry.state == .transcribing
-                            || model.isWorking
-                    )
+            ViewThatFits(in: .horizontal) {
+                detailHeader(entry, horizontal: true)
+                detailHeader(entry, horizontal: false)
             }
 
-            HStack {
-                Picker("Lokales Modell", selection: $model.selectedModel) {
-                    ForEach(LocalModelChoice.allCases) { choice in
-                        Text(choice.title).tag(choice)
-                            .disabled(!model.isModelReady(choice))
-                    }
-                }
-                .disabled(model.isWorking || model.readyModels.isEmpty)
-                Button("Neu transkribieren") { model.retranscribeSelected() }
-                    .disabled(
-                        !entry.hasAudio
-                            || entry.state == .recording
-                            || entry.state == .transcribing
-                            || !model.isModelReady(model.selectedModel)
-                            || model.isWorking
-                    )
+            ViewThatFits(in: .horizontal) {
+                retranscriptionControls(horizontal: true)
+                retranscriptionControls(horizontal: false)
             }
 
             if model.isWorking { ProgressView("Wird ausschließlich lokal transkribiert …") }
@@ -425,9 +417,82 @@ private struct RecordingHistoryView: View {
         .padding(20)
     }
 
+    @ViewBuilder
+    private func detailHeader(_ entry: RecordingHistoryEntry, horizontal: Bool) -> some View {
+        if horizontal {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(entry.createdAt, format: .dateTime.weekday().day().month().year().hour().minute())
+                        .font(.title2.bold())
+                    Text(summary(for: entry)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Löschen", role: .destructive) { confirmsDeleteSelected = true }
+                    .disabled(
+                        entry.state == .recording
+                            || entry.state == .transcribing
+                            || model.isWorking
+                    )
+                    .tint(.red)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(entry.createdAt, format: .dateTime.weekday().day().month().year().hour().minute())
+                        .font(.title2.bold())
+                    Text(summary(for: entry)).foregroundStyle(.secondary)
+                }
+                Button("Löschen", role: .destructive) { confirmsDeleteSelected = true }
+                    .disabled(
+                        entry.state == .recording
+                            || entry.state == .transcribing
+                            || model.isWorking
+                    )
+                    .tint(.red)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func retranscriptionControls(horizontal: Bool) -> some View {
+        if horizontal {
+            HStack {
+                retranscriptionPicker
+                retranscriptionButton
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                retranscriptionPicker
+                retranscriptionButton
+            }
+        }
+    }
+
+    private var retranscriptionPicker: some View {
+        Picker("Lokales Modell", selection: $model.selectedModel) {
+            ForEach(LocalModelChoice.allCases) { choice in
+                Text(choice.title).tag(choice)
+                    .disabled(!model.isModelReady(choice))
+            }
+        }
+        .disabled(model.isWorking || model.readyModels.isEmpty)
+    }
+
+    private var retranscriptionButton: some View {
+        Button("Neu transkribieren") { model.retranscribeSelected() }
+            .disabled(
+                model.selectedEntry?.hasAudio != true
+                    || model.selectedEntry?.state == .recording
+                    || model.selectedEntry?.state == .transcribing
+                    || !model.isModelReady(model.selectedModel)
+                    || model.isWorking
+            )
+    }
+
     private func summary(for entry: RecordingHistoryEntry) -> String {
         let duration = entry.durationSeconds.map { String(format: "%.1f s", $0) } ?? "ohne Audio"
-        return "\(entry.state.title) · \(duration) · \(entry.transcripts.count) Version(en)"
+        let versions = entry.transcripts.count == 1 ? "1 Version" : "\(entry.transcripts.count) Versionen"
+        return "\(entry.state.title) · \(duration) · \(versions)"
     }
 }
 
@@ -436,7 +501,7 @@ private extension RecordingHistoryState {
         switch self {
         case .recording: "Aufnahme läuft"
         case .ready: "Bereit"
-        case .transcribing: "Transkribiert"
+        case .transcribing: "Wird transkribiert"
         case .completed: "Abgeschlossen"
         case .failed: "Erneut versuchen"
         case .interrupted: "Unterbrochen"

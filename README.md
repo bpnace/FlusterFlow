@@ -15,7 +15,7 @@ Der MVP ist als Swift-6-Menüleisten-App für macOS 15 oder neuer integriert. Er
 - deterministisches lokales Cleanup sowie begrenzte Context Awareness;
 - strikte, bestätigte Einfügung an der unmittelbar vor dem Commit neu erfassten Cursorposition: native Felder über Accessibility-Mutationen, webbasierte Chatfelder über direkte Unicode-Tastaturereignisse und immer ohne automatische Zwischenablage;
 - optionale OpenAI-Überarbeitung mit eigenem API-Key aus dem macOS-Schlüsselbund;
-- explizites Onboarding für Mikrofon, Bedienungshilfen und das lokale Modell;
+- ein gemeinsames App-Fenster mit Übersicht, Aufnahmen und allen Einstellungen; die Ersteinrichtung für Mikrofon, Bedienungshilfen und lokales Modell ist direkt in die Übersicht integriert;
 - inhaltsfreie Diagnosemetriken mit p50/p95-Export.
 
 ## Datenschutzvertrag
@@ -36,9 +36,9 @@ Der Qwen-Build benötigt Apples optionale Xcode-Metal-Toolchain. Falls `xcrun me
 
 1. Einmalig `bash Scripts/setup-private-signing.sh` ausführen. Dadurch entsteht ein ausschließlich lokal verwendeter FlusterFlow-Schlüsselbund mit stabiler Code-Signing-Identität. Sein zufälliges Kennwort liegt nur im geschützten FlusterFlow-Supportordner des aktuellen Benutzers.
 2. Für die normale private Einrichtung mit `bash Scripts/build-install-private.sh` eine signierte Release-App unter `~/Applications/FlusterFlow.app` installieren und starten. Für Release- oder TCC-Evidenz muss stattdessen die in `docs/verification-harnesses.md` dokumentierte verifizierte Artefaktkette verwendet werden; der Standard-Installer baut dafür ausdrücklich nicht dasselbe Artefakt.
-3. Im Onboarding Mikrofon und Bedienungshilfen ausdrücklich erlauben. Beides ist für den direkten Diktierpfad erforderlich.
-4. Das gepinnte lokale Modell in den Einstellungen importieren oder den einmaligen Download bewusst bestätigen. Es erfolgt kein automatischer Modelldownload.
-5. Sprache, Mikrofon und Push-to-talk-Kürzel auswählen. Standard ist `⌃⌥Leertaste`. Handsfree kann separat aktiviert werden und startet dann per Doppeltipp auf dieses Kürzel.
+3. In der Übersicht Mikrofon und Bedienungshilfen ausdrücklich erlauben. Beides ist für den direkten Diktierpfad erforderlich.
+4. Das gepinnte lokale Modell in der Übersicht oder unter „Modelle“ importieren beziehungsweise den einmaligen Download bewusst bestätigen. Es erfolgt kein automatischer Modelldownload.
+5. Unter „Diktat“ Sprache und Push-to-talk-Kürzel auswählen. Standard ist `⌃⌥Leertaste`. Handsfree kann separat aktiviert werden und startet dann per Doppeltipp auf dieses Kürzel.
 6. Optional später unter „Cloud“ den eigenen OpenAI-API-Key hinterlegen und Cloud-Überarbeitung aktivieren. Für den lokalen Betrieb ist kein Key nötig.
 
 Nicht aus wechselnden `DerivedData`- oder `/tmp`-Pfaden starten: Ad-hoc-/Test-Builds besitzen nach jedem Neubau eine andere Code-Identität und verlieren deshalb die Zuordnung zu bereits erteilten Bedienungshilfen. Für den privaten Daily Driver ist ausschließlich die fest installierte und lokal signierte App vorgesehen. Debug-Builds verwenden deshalb eine getrennte Bundle-ID, und der Installer hinterlässt keine weiteren `.app`-Kopien. Der Release-Build führt mit aktiviertem Hardened Runtime ausschließlich das von Apple für Audioaufnahme verlangte `com.apple.security.device.audio-input`-Entitlement.

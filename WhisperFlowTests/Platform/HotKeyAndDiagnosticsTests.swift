@@ -96,7 +96,7 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
             defaults.removePersistentDomain(forName: suiteName)
         }
 
-        XCTAssertFalse(environment.startServices())
+        settings.retryPushToTalkRegistration()
         XCTAssertEqual(
             settings.pushToTalkRegistrationStatus,
             .failed(OSStatus(eventHotKeyExistsErr))

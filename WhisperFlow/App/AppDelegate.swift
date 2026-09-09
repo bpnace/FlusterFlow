@@ -55,7 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hasVisibleWindows flag: Bool
     ) -> Bool {
         guard didStartRuntime else { return false }
-        presentSettings()
+        environment.presentApp()
         return true
     }
 
@@ -64,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         environment.shutdown()
     }
 
-    private func makeMenu() -> NSMenu {
+    func makeMenu() -> NSMenu {
         let menu = NSMenu()
         menu.delegate = self
 
@@ -85,16 +85,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cancelStatusItem = cancel
         menu.addItem(cancel)
         menu.addItem(.separator())
-        menu.addItem(
-            withTitle: "Aufnahmen …",
+        let openApp = menu.addItem(
+            withTitle: "FlusterFlow öffnen",
+            action: #selector(openApp),
+            keyEquivalent: "1"
+        )
+        openApp.target = self
+        openApp.keyEquivalentModifierMask = [.command]
+        let recordings = menu.addItem(
+            withTitle: "Aufnahmen",
             action: #selector(openRecordingHistory),
-            keyEquivalent: "h"
-        ).target = self
-        menu.addItem(
+            keyEquivalent: "2"
+        )
+        recordings.target = self
+        recordings.keyEquivalentModifierMask = [.command]
+        let settings = menu.addItem(
             withTitle: "Einstellungen …",
             action: #selector(openSettings),
             keyEquivalent: ","
-        ).target = self
+        )
+        settings.target = self
+        settings.keyEquivalentModifierMask = [.command]
         menu.addItem(.separator())
         menu.addItem(
             withTitle: "FlusterFlow beenden",
@@ -114,6 +125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func refreshServiceStatus() {
         serviceStatusItem?.title = environment.serviceStatusTitle
+    }
+
+    @objc
+    private func openApp() {
+        environment.presentApp()
     }
 
     @objc
