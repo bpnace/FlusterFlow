@@ -21,13 +21,17 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       - name: Verify required tools
         run: |
           command -v jq
 
       - name: Verify repository hygiene
-        run: bash Scripts/verify-repository-hygiene.sh
+        run: |
+          bash Scripts/verify-repository-hygiene.sh
+          bash Scripts/verify-repository-hygiene.sh --history
 
       - name: Select Swift 6.2 toolchain
         run: |

@@ -32,6 +32,7 @@ Die App soll globales Push-to-talk, ein nicht aktivierendes Menüleisten-/Panel-
 - Ohne App Sandbox trägt die App selbst die Verantwortung für strikte Modul-, Daten- und Logging-Grenzen.
 - Accessibility ist eine mächtige Nutzerfreigabe und muss fail-closed behandelt werden.
 - Eine gültige statische Signatur beweist noch keine TCC-Kontinuität. Das private Release-Gate benötigt zwei Builds mit derselben lokalen Identität und einen praktischen Permission-Smoke am tatsächlich installierten Artefakt.
+- Die einmalige Umstellung auf diese neutrale Bundle-ID migriert keine Einstellungen aus der vorherigen Preferences-Domain. Einstellungen, Onboarding, Kürzel, persönliches Lexikon sowie Mikrofon- und Accessibility-Freigaben müssen neu gesetzt werden; Aufnahmehistorie und lokale Modelle bleiben erhalten.
 
 ## Verifikation
 

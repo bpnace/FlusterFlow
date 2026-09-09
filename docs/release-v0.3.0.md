@@ -78,7 +78,9 @@ Geprüft wurde der uncommittete Arbeitsstand auf Branch `feature/recording-histo
 
 Der erste installierte Handsfree-Lauf reproduzierte einen unbeschränkten Verarbeitungszustand und endete nach Nutzerabbruch mit `staleSession`. Nach Einführung der absoluten ASR-Zeitgrenze, begrenzter Cancellation-Grace, Backend-Quarantäne und fail-bounded Lifecycle-Aufräumung bestand der oben dokumentierte Wiederholungslauf. Die drei ausschließlich für diese Untersuchung erzeugten History-Einträge wurden danach entfernt und Handsfree auf den ursprünglichen Aus-Zustand zurückgesetzt. Kein Transkriptinhalt wurde in die Testprotokolle oder diese Quittung übernommen.
 
-Diese lokale Verifikation ersetzt weder die GitHub-CI noch die noch offenen manuellen Negativ- und Langzeittests auf dem Ziel-Mac.
+Diese lokale Verifikation ersetzt weder die GitHub-CI noch die noch offenen manuellen Negativ- und Langzeittests auf dem Ziel-Mac. Die anschließende Umstellung auf die neutrale Bundle- und Signing-Identität macht insbesondere die Signing-, Installations-, TCC-, Hotkey-, Accessibility- und Mikrofonergebnisse in den Zeilen 74 bis 77 zu historischer Diagnoseevidenz; sie gelten nicht als Release-Nachweis für das neue Artefakt.
+
+Die Identitätsumstellung ist eine bewusste lokale Breaking Change. Bestehende Einstellungen, Onboarding-Status, Kürzel und persönliche Lexikoneinträge aus der vorherigen Preferences-Domain werden nicht migriert, damit die frühere personenbezogene Kennung weder im Quellcode noch in der Repository-Historie fortgeführt wird. Der Nutzer muss diese Einstellungen und die macOS-Berechtigungen einmalig neu setzen. Die lokal gespeicherte Aufnahmehistorie und lokale Modelle bleiben erhalten, weil ihre Speicherorte nicht von der Bundle-ID abhängen.
 
 ## Manuelle Prüfung auf dem Ziel-Mac
 
@@ -91,6 +93,7 @@ Diese lokale Verifikation ersetzt weder die GitHub-CI noch die noch offenen manu
 - Während History-Retry Netzwerkaktivität, Zielkontext und automatische Einfügung ausschließen.
 - Einzelnes Löschen und „Alle löschen“ jeweils mit sichtbarer Bestätigung prüfen.
 - Lokal signierten Release-Build zweimal prüfen und dabei mit `Scripts/verify-private-signing.sh --identity '<40-hex-fingerprint>' --export-app "$VERIFIED_ROOT/FlusterFlow.app"` genau eines dieser geprüften Artefakte exportieren. Den inhaltsfreien `cdHash` aus der JSON-Ausgabe anschließend unverändert an `Scripts/build-install-private.sh --verified-app "$VERIFIED_ROOT/FlusterFlow.app" --expected-cdhash '<cdHash>'` übergeben. Mikrofon-/Accessibility-TCC-Kontinuität ausschließlich an diesem installierten Artefakt testen; kein erneuter Build zwischen Verifikation und Smoke.
+- Nach der Umstellung auf die neutrale App-Identität Einstellungen und persönliche Lexikoneinträge neu setzen, Mikrofon- und Accessibility-Zugriff neu freigeben und den vollständigen installierten Hotkey-/Real-Audio-Smoke erneut ausführen.
 
 ## Veröffentlichung
 
