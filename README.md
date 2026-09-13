@@ -155,10 +155,12 @@ Die isolierten AppKit-, WKWebView-, Accessibility- und Privacy-Harnesses sind un
 - [Verification Harnesses](docs/verification-harnesses.md)
 - [Architecture Decision Records](docs/adr)
 - [Release Notes 0.4.0](docs/release-v0.4.0.md)
+- [Beitragsrichtlinien](CONTRIBUTING.md)
+- [Sicherheitsrichtlinie](SECURITY.md)
 
 ## Beiträge
 
-Änderungen müssen die lokalen, fail-closed Datenschutz- und Einfügungsgrenzen erhalten und die jeweils betroffenen Prüfungen bestehen. Bitte halte Pull Requests fokussiert, dokumentiere neue Daten- oder Netzwerkpfade ausdrücklich und füge Regressionstests für geändertes Verhalten hinzu.
+Änderungen müssen die lokalen, fail-closed Datenschutz- und Einfügungsgrenzen erhalten und die jeweils betroffenen Prüfungen bestehen. Bitte halte Pull Requests fokussiert, dokumentiere neue Daten- oder Netzwerkpfade ausdrücklich und füge Regressionstests für geändertes Verhalten hinzu. Der vollständige Ablauf steht in den [Beitragsrichtlinien](CONTRIBUTING.md). Sicherheitslücken bitte ausschließlich nach der [Sicherheitsrichtlinie](SECURITY.md) melden.
 
 ## Lizenz
 
