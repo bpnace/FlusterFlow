@@ -1,49 +1,8 @@
 import AppKit
 import SwiftUI
 
-@MainActor
-final class SettingsWindowController: NSWindowController {
-    init(
-        store: SettingsStore,
-        permissions: PermissionCenter,
-        apiKey: APIKeySettingsModel,
-        model: ModelProvisioningViewModel,
-        diagnostics: DiagnosticsViewModel,
-        lexicon: PersonalLexiconStore
-    ) {
-        let view = LocalSettingsView(
-            store: store,
-            permissions: permissions,
-            apiKey: apiKey,
-            model: model,
-            diagnostics: diagnostics,
-            lexicon: lexicon
-        )
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 650, height: 720),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "FlusterFlow Einstellungen"
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-        window.isReleasedWhenClosed = false
-        super.init(window: window)
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    func present() {
-        showWindow(nil)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
-    }
-}
-
-private struct LocalSettingsView: View {
+struct LocalSettingsView: View {
+    let destination: AppDestination
     @ObservedObject var store: SettingsStore
     @ObservedObject var permissions: PermissionCenter
     @ObservedObject var apiKey: APIKeySettingsModel
@@ -53,6 +12,7 @@ private struct LocalSettingsView: View {
     @ObservedObject var lexicon: PersonalLexiconStore
     @State private var apiKeyEntry = ""
     @State private var confirmsModelDownload = false
+    @State private var confirmsLexiconReset = false
     @State private var lexiconCanonical = ""
     @State private var lexiconMisspellings = ""
     @State private var editingLexiconEntryID: UUID?
@@ -60,14 +20,14 @@ private struct LocalSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("FlusterFlow")
-                        .font(.largeTitle.bold())
-                    Text("Privates Push-to-talk-Diktat für diesen Mac")
-                        .foregroundStyle(.secondary)
-                }
+                CoralPageHeader(
+                    title: destination.title,
+                    subtitle: destination.settingsSubtitle,
+                    systemImage: destination.systemImage
+                )
 
-                SettingsSection(title: "Diktat") {
+                if destination == .dictation {
+                    SettingsSection {
                     Picker("Sprache", selection: $store.language) {
                         Text("Automatisch").tag(DictationLanguage.automatic)
                         Text("Deutsch").tag(DictationLanguage.german)
@@ -76,6 +36,12 @@ private struct LocalSettingsView: View {
                     .pickerStyle(.segmented)
 
                     Toggle("Push-to-talk aktivieren", isOn: $store.pushToTalkEnabled)
+
+                    Toggle("Handsfree per Doppeltipp", isOn: $store.handsFreeEnabled)
+                        .disabled(!store.pushToTalkEnabled)
+                    Text("Zweimal kurz drücken, um die Aufnahme ohne Halten fortzusetzen. Ein weiterer Druck beendet sie.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
                     LabeledContent("Tastenkürzel") {
                         ShortcutRecorderField(
@@ -118,9 +84,11 @@ private struct LocalSettingsView: View {
                         Text("macOS-Systemeingabe")
                             .foregroundStyle(.secondary)
                     }
+                    }
                 }
 
-                SettingsSection(title: "Lokales Modell") {
+                if destination == .models {
+                    SettingsSection {
                     Picker("Modell", selection: $store.localModel) {
                         ForEach(LocalModelChoice.allCases) { choice in
                             Text(choice.title).tag(choice)
@@ -154,23 +122,27 @@ private struct LocalSettingsView: View {
                     Text("Ein Download startet niemals automatisch. Import und Download prüfen Größe und SHA-256 jedes Artefakts.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    }
                 }
 
-                SettingsSection(title: "Lokale Privatsphäre") {
+                if destination == .privacy {
+                    SettingsSection {
                     Toggle(
                         "Begrenzten Kontext am Cursor lokal verwenden",
                         isOn: $store.contextAwarenessEnabled
                     )
-                    Text("Maximal 1.500 Zeichen aus dem fokussierten editierbaren Feld. Keine Screenshots, keine Historie, keine Telemetrie und keine automatische Zwischenablage.")
+                    Text("Maximal 1.500 Zeichen aus dem fokussierten editierbaren Feld. Keine Screenshots, keine Telemetrie und keine automatische Zwischenablage. Aufnahmen und Transkripte verbleiben in der separat löschbaren lokalen Historie.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     LabeledContent("Standardpfad") {
                         Label("Nur lokal", systemImage: "lock.fill")
                             .foregroundStyle(.green)
                     }
+                    }
                 }
 
-                SettingsSection(title: "Persönliches Lexikon") {
+                if destination == .lexicon {
+                    SettingsSection {
                     Toggle(
                         "Korrekturen im gerade eingefügten Text lokal lernen",
                         isOn: $store.localLearningEnabled
@@ -198,12 +170,12 @@ private struct LocalSettingsView: View {
                         }
                         .disabled(!lexicon.canUndo)
                         Button(role: .destructive) {
-                            _ = lexicon.reset()
-                            clearLexiconForm()
+                            confirmsLexiconReset = true
                         } label: {
-                            Label("Reset", systemImage: "trash")
+                            Label("Lexikon zurücksetzen", systemImage: "trash")
                         }
                         .disabled(!lexicon.canReset)
+                        .tint(.red)
                     }
 
                     if !lexicon.suggestions.isEmpty {
@@ -272,13 +244,16 @@ private struct LocalSettingsView: View {
                                     Label("Löschen", systemImage: "trash")
                                 }
                                 .labelStyle(.iconOnly)
+                                .tint(.red)
                             }
                             .buttonStyle(.borderless)
                         }
                     }
+                    }
                 }
 
-                SettingsSection(title: "Optionale OpenAI-Überarbeitung") {
+                if destination == .cloud {
+                    SettingsSection {
                     LabeledContent("API-Schlüssel") {
                         Text(apiKey.state.title)
                             .foregroundStyle(apiKey.hasStoredKey ? .green : .secondary)
@@ -294,6 +269,7 @@ private struct LocalSettingsView: View {
                             Button("Löschen", role: .destructive) {
                                 deleteAPIKey()
                             }
+                            .tint(.red)
                         }
                     }
 
@@ -318,9 +294,11 @@ private struct LocalSettingsView: View {
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    }
                 }
 
-                SettingsSection(title: "Berechtigungen") {
+                if destination == .permissions {
+                    SettingsSection {
                     PermissionSettingRow(
                         title: "Mikrofon",
                         state: permissions.microphone,
@@ -335,9 +313,11 @@ private struct LocalSettingsView: View {
                     )
                     Button("Status aktualisieren", action: permissions.refresh)
                         .controlSize(.small)
+                    }
                 }
 
-                SettingsSection(title: "System und Diagnose") {
+                if destination == .general {
+                    SettingsSection {
                     Toggle(
                         "Beim Anmelden starten",
                         isOn: Binding(
@@ -359,23 +339,27 @@ private struct LocalSettingsView: View {
                     Text("Der Bericht enthält nur Versionen, Berechtigungs-/Modellstatus und aggregierte Laufzeiten – niemals Audio, Text, Kontext, Pfade, Fenstertitel oder Schlüssel.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    }
+                    Text(ApplicationVersion.current.displayText)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .accessibilityLabel(
+                            "FlusterFlow \(ApplicationVersion.current.displayText)"
+                        )
                 }
-
-                Text(ApplicationVersion.current.displayText)
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .accessibilityLabel(
-                        "FlusterFlow \(ApplicationVersion.current.displayText)"
-                    )
             }
             .padding(28)
         }
-        .frame(minWidth: 590, minHeight: 620)
+        .frame(maxWidth: 760, alignment: .topLeading)
+        .background(CoralEclipseStyle.canvas)
         .task {
             permissions.refresh()
             apiKey.refresh()
             model.refresh()
+        }
+        .onDisappear {
+            store.setShortcutCaptureActive(false)
         }
         .confirmationDialog(
             "Gepinntes Sprachmodell laden?",
@@ -388,6 +372,20 @@ private struct LocalSettingsView: View {
             Button("Abbrechen", role: .cancel) {}
         } message: {
             Text("Ein einmaliger HTTPS-Download von Hugging Face wird gestartet. Danach bleibt der Diktatpfad offline.")
+        }
+        .confirmationDialog(
+            "Persönliches Lexikon vollständig zurücksetzen?",
+            isPresented: $confirmsLexiconReset,
+            titleVisibility: .visible
+        ) {
+            Button("Lexikon endgültig zurücksetzen", role: .destructive) {
+                _ = lexicon.reset()
+                clearLexiconForm()
+            }
+            .tint(.red)
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Alle Einträge und Vorschläge werden von diesem Mac entfernt.")
         }
     }
 
@@ -484,7 +482,12 @@ private struct PermissionSettingRow: View {
 
     var body: some View {
         HStack {
-            Text(title)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text("Erforderlich")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             Text(state.title)
                 .foregroundStyle(state == .authorized ? .green : .secondary)
@@ -493,23 +496,29 @@ private struct PermissionSettingRow: View {
                     .controlSize(.small)
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title), erforderlich, \(state.title)")
     }
 }
 
 private struct SettingsSection<Content: View>: View {
-    let title: String
     @ViewBuilder let content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
             VStack(alignment: .leading, spacing: 12) {
                 content
             }
-            .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .padding(18)
+        .background(
+            CoralEclipseStyle.raisedSurface,
+            in: RoundedRectangle(cornerRadius: CoralEclipseStyle.panelRadius)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: CoralEclipseStyle.panelRadius)
+                .stroke(CoralEclipseStyle.hairline, lineWidth: 1)
         }
     }
 }

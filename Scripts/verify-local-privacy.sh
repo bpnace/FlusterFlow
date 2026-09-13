@@ -67,7 +67,7 @@ jq -e '
   .status == "failed" and
   .limitations == ["Harness setup failed: runtime-operation."]
 ' "$setup_failure_report" >/dev/null
-if rg -q -F '/tmp/flusterflow-private-path-secret' "$setup_failure_report"; then
+if grep -q -F '/tmp/flusterflow-private-path-secret' "$setup_failure_report"; then
   echo "privacy harness exposed a child path in its failure report" >&2
   exit 1
 fi

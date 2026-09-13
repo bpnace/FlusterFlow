@@ -95,8 +95,10 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         await enrichmentStarted.wait()
         let startCount = await audio.startCount()
         let snapshot = await coordinator.snapshot()
+        let recordingStartDate = await coordinator.recordingStartDate(for: sessionID)
 
         XCTAssertEqual(startCount, 1)
+        XCTAssertNotNil(recordingStartDate)
         XCTAssertEqual(
             snapshot,
             DictationSnapshot(phase: .listening, activeSessionID: sessionID)
@@ -134,6 +136,208 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(candidates, [.local(LocalCandidate(text: "hello"))])
     }
 
+    func testFinalizedAudioIsPersistedBeforeTranscriptVersion() async {
+        let history = RecordingHistorySpy()
+        let coordinator = makeCoordinator(recordingHistory: history)
+        let sessionID = startedSessionID(await coordinator.start(language: .german))
+
+        _ = await coordinator.stop(sessionID: sessionID)
+        let events = await history.events()
+
+        XCTAssertEqual(events, ["begin:german", "audio", "transcript:hello"])
+    }
+
+    func testRecognitionFailureKeepsPersistedAudioMarkedFailed() async {
+        let history = RecordingHistorySpy()
+        let coordinator = makeCoordinator(
+            recognizer: FailingRecognizer(),
+            recordingHistory: history
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+
+        _ = await coordinator.stop(sessionID: sessionID)
+        let events = await history.events()
+
+        XCTAssertEqual(events, ["begin:automatic", "audio", "failed"])
+    }
+
+    func testProductASRDeadlineFailsCurrentSessionAndPreservesHistoryAudio() async {
+        let large = NeverCompletingCoordinatorRecognizer()
+        let adaptive = AdaptiveWhisperKitRecognizer(
+            turbo: LowQualityCoordinatorRecognizer(),
+            large: large
+        )
+        let router = SessionModelSpeechRecognizer(
+            recognizers: [.adaptive: adaptive],
+            productASRDeadline: .milliseconds(30),
+            productASRCancellationGrace: .milliseconds(10)
+        )
+        let history = RecordingHistorySpy()
+        let coordinator = makeCoordinator(
+            recognizer: router,
+            recordingHistory: history
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+        await router.register(.adaptive, for: sessionID)
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+        let snapshot = await coordinator.snapshot()
+        let events = await history.events()
+        let largeInvocationCount = await large.transcriptionCount()
+        let largeCancellationCount = await large.cancellationCount()
+
+        XCTAssertEqual(
+            outcome,
+            .failed(sessionID, DictationFailure(stage: .recognition))
+        )
+        XCTAssertEqual(
+            snapshot,
+            DictationSnapshot(
+                phase: .error(DictationFailure(stage: .recognition)),
+                activeSessionID: nil
+            )
+        )
+        XCTAssertEqual(events, ["begin:automatic", "audio", "failed"])
+        XCTAssertEqual(largeInvocationCount, 1)
+        XCTAssertGreaterThanOrEqual(largeCancellationCount, 1)
+    }
+
+    func testEmptyFinalizedRecordingReturnsNoSpeechAndLeavesNoHistoryEntry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let historyStore = RecordingHistoryStore(rootURL: root)
+        let sampleStore = AudioBufferStore()
+        let audio = EmptyStoredAudioCapture(store: sampleStore)
+        let recognizer = CountingBorrowingRecognizer()
+        let history = RecordingHistoryRecorder(store: historyStore, sampleAccess: sampleStore)
+        let coordinator = makeCoordinator(
+            audioCapture: audio,
+            recognizer: recognizer,
+            recordingHistory: history
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+        let entries = try await historyStore.list()
+        let transcriptionCount = await recognizer.transcriptionCount()
+
+        XCTAssertEqual(outcome, .noSpeech(sessionID))
+        XCTAssertTrue(entries.isEmpty)
+        XCTAssertEqual(transcriptionCount, 0)
+    }
+
+    func testHistoryBeginFailureStopsCaptureAndSurfacesError() async {
+        let audio = CountingAudioCapture()
+        let coordinator = makeCoordinator(
+            audioCapture: audio,
+            recordingHistory: FailingRecordingHistory(stage: .begin)
+        )
+
+        let outcome = await coordinator.start()
+
+        XCTAssertEqual(
+            outcome,
+            .failed(DictationSessionID(rawValue: 1), DictationFailure(stage: .audioStart))
+        )
+        let cancellationCount = await audio.cancelCount()
+        XCTAssertEqual(cancellationCount, 1)
+    }
+
+    func testAudioPersistenceFailurePreventsRecognition() async {
+        let recognizer = CountingBorrowingRecognizer()
+        let coordinator = makeCoordinator(
+            recognizer: recognizer,
+            recordingHistory: FailingRecordingHistory(stage: .audio)
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+
+        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .audioFinalize)))
+        let transcriptionCount = await recognizer.transcriptionCount()
+        XCTAssertEqual(transcriptionCount, 0)
+    }
+
+    func testTranscriptPersistenceFailurePreventsInsertion() async {
+        let insertion = RecordingInsertion()
+        let coordinator = makeCoordinator(
+            insertion: insertion,
+            recordingHistory: FailingRecordingHistory(stage: .transcript)
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+
+        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .recognition)))
+        let insertionCount = await insertion.count()
+        XCTAssertEqual(insertionCount, 0)
+    }
+
+    func testFailureStatePersistenceFailureSurfacesAudioFinalizeFailure() async {
+        let coordinator = makeCoordinator(
+            recognizer: FailingRecognizer(),
+            recordingHistory: FailingRecordingHistory(stage: .markFailed)
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+
+        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .audioFinalize)))
+    }
+
+    func testCancellationPersistenceFailureSurfacesErrorState() async {
+        let coordinator = makeCoordinator(
+            recordingHistory: FailingRecordingHistory(stage: .interrupt)
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+
+        let outcome = await coordinator.cancel(sessionID: sessionID)
+        let snapshot = await coordinator.snapshot()
+
+        XCTAssertEqual(
+            outcome,
+            .failed(sessionID, DictationFailure(stage: .audioFinalize))
+        )
+        XCTAssertEqual(
+            snapshot,
+            DictationSnapshot(
+                phase: .error(DictationFailure(stage: .audioFinalize)),
+                activeSessionID: nil
+            )
+        )
+    }
+
+    func testTerminalHistoryWritesRetryBeforeSessionResourcesAreReleased() async {
+        let failedHistory = TransientTerminalWriteRecordingHistory(
+            terminal: .failed,
+            failuresBeforeSuccess: 2
+        )
+        let failedCoordinator = makeCoordinator(recordingHistory: failedHistory)
+        let failedSessionID = startedSessionID(await failedCoordinator.start())
+
+        let failedOutcome = await failedCoordinator.stop(sessionID: failedSessionID)
+        let failedAttempts = await failedHistory.terminalAttemptCount()
+
+        XCTAssertEqual(
+            failedOutcome,
+            .failed(failedSessionID, DictationFailure(stage: .audioFinalize))
+        )
+        XCTAssertEqual(failedAttempts, 3)
+
+        let interruptedHistory = TransientTerminalWriteRecordingHistory(
+            terminal: .interrupted,
+            failuresBeforeSuccess: 2
+        )
+        let interruptedCoordinator = makeCoordinator(recordingHistory: interruptedHistory)
+        let interruptedSessionID = startedSessionID(await interruptedCoordinator.start())
+
+        let interruptedOutcome = await interruptedCoordinator.cancel(sessionID: interruptedSessionID)
+        let interruptedAttempts = await interruptedHistory.terminalAttemptCount()
+
+        XCTAssertEqual(interruptedOutcome, .cancelled(interruptedSessionID))
+        XCTAssertEqual(interruptedAttempts, 3)
+    }
+
     func testIncrementalRecognitionStopsBeforeCanonicalFinalDecode() async {
         let firstUpdate = AsyncGate()
         let audio = StreamingAudioCapture()
@@ -151,6 +355,65 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
 
         XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect))
         XCTAssertEqual(events, ["start", "update", "stop", "finalize", "cancel"])
+    }
+
+    func testCancellationDrainsCheckpointProducerBeforeInterruptingHistory() async {
+        let checkpointStarted = AsyncGate()
+        let releaseCheckpoint = AsyncGate()
+        let recognitionStopped = AsyncGate()
+        let history = GatedCheckpointRecordingHistory(
+            checkpointStarted: checkpointStarted,
+            releaseCheckpoint: releaseCheckpoint
+        )
+        let coordinator = makeCoordinator(
+            audioCapture: StreamingAudioCapture(),
+            recognizer: StreamingLifecycleRecognizer(
+                firstUpdate: AsyncGate(),
+                recognitionStopped: recognitionStopped
+            ),
+            recordingHistory: history
+        )
+        let sessionID = startedSessionID(await coordinator.start(language: .german))
+
+        await coordinator.beginIncrementalRecognition(sessionID: sessionID)
+        await checkpointStarted.wait()
+        let cancellation = Task { await coordinator.cancel(sessionID: sessionID) }
+        await recognitionStopped.wait()
+        let eventsBeforeCheckpointRelease = await history.events()
+
+        XCTAssertEqual(eventsBeforeCheckpointRelease, ["begin", "checkpointStarted"])
+
+        await releaseCheckpoint.open()
+        let outcome = await cancellation.value
+        let finalEvents = await history.events()
+
+        XCTAssertEqual(outcome, .cancelled(sessionID))
+        XCTAssertEqual(
+            finalEvents,
+            ["begin", "checkpointStarted", "checkpointFinished", "interrupted"]
+        )
+    }
+
+    func testCheckpointPersistenceFailureInvokesFatalHistoryHandler() async {
+        let firstUpdate = AsyncGate()
+        let historyFailure = AsyncGate()
+        let audio = StreamingAudioCapture()
+        let coordinator = makeCoordinator(
+            audioCapture: audio,
+            recognizer: StreamingLifecycleRecognizer(firstUpdate: firstUpdate),
+            recordingHistory: FailingRecordingHistory(stage: .checkpoint)
+        )
+        await coordinator.setRecordingHistoryFailureHandler { _ in
+            await historyFailure.open()
+        }
+        let sessionID = startedSessionID(await coordinator.start(language: .german))
+
+        await coordinator.beginIncrementalRecognition(sessionID: sessionID)
+        await historyFailure.wait()
+
+        let snapshot = await coordinator.snapshot()
+        XCTAssertEqual(snapshot.activeSessionID, sessionID)
+        _ = await coordinator.cancel(sessionID: sessionID)
     }
 
     func testFastSpeechReleaseFinalDecodesWhenStreamingHasNoAudioYet() async {
@@ -558,6 +821,37 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         )
         XCTAssertEqual(insertionCount, 0)
         _ = await coordinator.cancel(sessionID: currentSessionID)
+    }
+
+    func testCancelDuringBlockedRecognitionPreservesFinalizedHistoryAudio() async throws {
+        let recognitionStarted = AsyncGate()
+        let releaseRecognition = AsyncGate()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let historyStore = RecordingHistoryStore(rootURL: root)
+        let sampleStore = AudioBufferStore()
+        let audio = StoredAudioCapture(store: sampleStore)
+        let history = RecordingHistoryRecorder(store: historyStore, sampleAccess: sampleStore)
+        let coordinator = makeCoordinator(
+            audioCapture: audio,
+            recognizer: GatedRecognizer(started: recognitionStarted, release: releaseRecognition),
+            recordingHistory: history
+        )
+        let sessionID = startedSessionID(await coordinator.start())
+        let stopTask = Task { await coordinator.stop(sessionID: sessionID) }
+        await recognitionStarted.wait()
+
+        let cancelOutcome = await coordinator.cancel(sessionID: sessionID)
+        await releaseRecognition.open()
+        _ = await stopTask.value
+        let entries = try await historyStore.list()
+        let entry = try XCTUnwrap(entries.first)
+        let recoveredAudio = try await historyStore.loadAudio(for: entry.id)
+
+        XCTAssertEqual(cancelOutcome, .cancelled(sessionID))
+        XCTAssertEqual(entry.state, .interrupted)
+        XCTAssertTrue(entry.hasAudio)
+        XCTAssertEqual(recoveredAudio.values, [0.1, -0.1])
     }
 
     func testCancelAfterAudioFinalizationBeforeRecognitionReleasesOwnedBuffer() async {
@@ -1008,7 +1302,8 @@ private func makeCoordinator(
     enrichment: any TextEnriching = PassthroughEnrichment(),
     localRewriter: (any TextRewriting)? = nil,
     insertion: any TextInserting = RecordingInsertion(),
-    fallbackText: (any EphemeralTextPreserving)? = nil
+    fallbackText: (any EphemeralTextPreserving)? = nil,
+    recordingHistory: (any RecordingHistoryRecording)? = nil
 ) -> DictationCoordinator {
     DictationCoordinator(
         contextProvider: contextProvider,
@@ -1018,8 +1313,159 @@ private func makeCoordinator(
         enrichment: enrichment,
         localRewriter: localRewriter,
         insertion: insertion,
-        fallbackText: fallbackText
+        fallbackText: fallbackText,
+        recordingHistory: recordingHistory
     )
+}
+
+private actor RecordingHistorySpy: RecordingHistoryRecording {
+    private var recordedEvents: [String] = []
+
+    func begin(sessionID: DictationSessionID, language: DictationLanguage) {
+        recordedEvents.append("begin:\(language.storageValue)")
+    }
+
+    func persistAudio(_ input: AudioInput, sessionID: DictationSessionID) {
+        recordedEvents.append("audio")
+    }
+
+    func persistCheckpoint(_ chunk: RecognitionAudioChunk, sessionID: DictationSessionID) {
+        recordedEvents.append("checkpoint")
+    }
+
+    func persistTranscript(_ transcript: RawTranscript, sessionID: DictationSessionID) {
+        recordedEvents.append("transcript:\(transcript.text)")
+    }
+
+    func markFailed(sessionID: DictationSessionID) throws {
+        recordedEvents.append("failed")
+    }
+
+    func interrupt(sessionID: DictationSessionID) throws {
+        recordedEvents.append("interrupted")
+    }
+
+    func events() -> [String] { recordedEvents }
+}
+
+private actor GatedCheckpointRecordingHistory: RecordingHistoryRecording {
+    private let checkpointStarted: AsyncGate
+    private let releaseCheckpoint: AsyncGate
+    private var recordedEvents: [String] = []
+
+    init(checkpointStarted: AsyncGate, releaseCheckpoint: AsyncGate) {
+        self.checkpointStarted = checkpointStarted
+        self.releaseCheckpoint = releaseCheckpoint
+    }
+
+    func begin(sessionID: DictationSessionID, language: DictationLanguage) {
+        recordedEvents.append("begin")
+    }
+
+    func persistCheckpoint(
+        _ chunk: RecognitionAudioChunk,
+        sessionID: DictationSessionID
+    ) async {
+        recordedEvents.append("checkpointStarted")
+        await checkpointStarted.open()
+        await releaseCheckpoint.wait()
+        recordedEvents.append("checkpointFinished")
+    }
+
+    func persistAudio(_ input: AudioInput, sessionID: DictationSessionID) {}
+    func persistTranscript(_ transcript: RawTranscript, sessionID: DictationSessionID) {}
+    func markFailed(sessionID: DictationSessionID) {}
+
+    func interrupt(sessionID: DictationSessionID) {
+        recordedEvents.append("interrupted")
+    }
+
+    func events() -> [String] {
+        recordedEvents
+    }
+}
+
+private struct FailingRecordingHistory: RecordingHistoryRecording {
+    enum Stage: Sendable { case begin, checkpoint, audio, transcript, markFailed, interrupt }
+    let stage: Stage
+
+    func begin(sessionID: DictationSessionID, language: DictationLanguage) throws {
+        if stage == .begin { throw TestFailure.expected }
+    }
+
+    func persistCheckpoint(
+        _ chunk: RecognitionAudioChunk,
+        sessionID: DictationSessionID
+    ) throws {
+        if stage == .checkpoint { throw TestFailure.expected }
+    }
+
+    func persistAudio(_ input: AudioInput, sessionID: DictationSessionID) throws {
+        if stage == .audio { throw TestFailure.expected }
+    }
+
+    func persistTranscript(_ transcript: RawTranscript, sessionID: DictationSessionID) throws {
+        if stage == .transcript { throw TestFailure.expected }
+    }
+
+    func markFailed(sessionID: DictationSessionID) throws {
+        if stage == .markFailed { throw TestFailure.expected }
+    }
+
+    func interrupt(sessionID: DictationSessionID) throws {
+        if stage == .interrupt { throw TestFailure.expected }
+    }
+}
+
+private actor TransientTerminalWriteRecordingHistory: RecordingHistoryRecording {
+    enum Terminal: Sendable {
+        case failed
+        case interrupted
+    }
+
+    private let terminal: Terminal
+    private let failuresBeforeSuccess: Int
+    private var terminalAttempts = 0
+
+    init(terminal: Terminal, failuresBeforeSuccess: Int) {
+        self.terminal = terminal
+        self.failuresBeforeSuccess = failuresBeforeSuccess
+    }
+
+    func begin(sessionID: DictationSessionID, language: DictationLanguage) {}
+
+    func persistCheckpoint(
+        _ chunk: RecognitionAudioChunk,
+        sessionID: DictationSessionID
+    ) {}
+
+    func persistAudio(_ input: AudioInput, sessionID: DictationSessionID) throws {
+        if terminal == .failed {
+            throw TestFailure.expected
+        }
+    }
+
+    func persistTranscript(_ transcript: RawTranscript, sessionID: DictationSessionID) {}
+
+    func markFailed(sessionID: DictationSessionID) throws {
+        guard terminal == .failed else { return }
+        terminalAttempts += 1
+        if terminalAttempts <= failuresBeforeSuccess {
+            throw TestFailure.expected
+        }
+    }
+
+    func interrupt(sessionID: DictationSessionID) throws {
+        guard terminal == .interrupted else { return }
+        terminalAttempts += 1
+        if terminalAttempts <= failuresBeforeSuccess {
+            throw TestFailure.expected
+        }
+    }
+
+    func terminalAttemptCount() -> Int {
+        terminalAttempts
+    }
 }
 
 private func startedSessionID(
@@ -1187,15 +1633,17 @@ private actor CountingAudioCapture: AudioCapturing {
 }
 
 private actor StoredAudioCapture: AudioCapturing {
-    private let store = AudioBufferStore()
+    private let store: AudioBufferStore
     private let finalized: AsyncGate?
     private let returnFinalizedInput: AsyncGate?
     private var releases = 0
 
     init(
+        store: AudioBufferStore = AudioBufferStore(),
         finalized: AsyncGate? = nil,
         returnFinalizedInput: AsyncGate? = nil
     ) {
+        self.store = store
         self.finalized = finalized
         self.returnFinalizedInput = returnFinalizedInput
     }
@@ -1221,6 +1669,26 @@ private actor StoredAudioCapture: AudioCapturing {
     }
 
     func releaseCount() -> Int { releases }
+}
+
+private actor EmptyStoredAudioCapture: AudioCapturing {
+    private let store: AudioBufferStore
+
+    init(store: AudioBufferStore) {
+        self.store = store
+    }
+
+    func startCapture(for sessionID: DictationSessionID) async throws {}
+
+    func finishCapture(for sessionID: DictationSessionID) async throws -> AudioInput {
+        await store.store(AudioSamples(values: []))
+    }
+
+    func cancelCapture(for sessionID: DictationSessionID) async {}
+
+    func release(_ input: AudioInput) async {
+        await store.release(input)
+    }
 }
 
 private actor SilentAudioCapture: AudioCapturing {
@@ -1317,10 +1785,12 @@ private actor StreamingAudioCapture: AudioCapturing, IncrementalAudioProviding {
 
 private actor StreamingLifecycleRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
     private let firstUpdate: AsyncGate
+    private let recognitionStopped: AsyncGate?
     private var events: [String] = []
 
-    init(firstUpdate: AsyncGate) {
+    init(firstUpdate: AsyncGate, recognitionStopped: AsyncGate? = nil) {
         self.firstUpdate = firstUpdate
+        self.recognitionStopped = recognitionStopped
     }
 
     func transcribe(
@@ -1359,6 +1829,7 @@ private actor StreamingLifecycleRecognizer: SpeechRecognizing, SpeechRecognition
 
     func stopRecognitionSession(sessionID: DictationSessionID) async {
         events.append("stop")
+        await recognitionStopped?.open()
     }
 
     func finalizeRecognitionSession(
@@ -1423,6 +1894,54 @@ private actor FastReleaseLifecycleRecognizer: SpeechRecognizing, SpeechRecogniti
     }
 
     func recordedEvents() -> [String] { events }
+}
+
+private actor LowQualityCoordinatorRecognizer: SpeechRecognizing {
+    func transcribe(
+        _ audio: AudioInput,
+        hints: RecognitionHints,
+        sessionID: DictationSessionID
+    ) -> RawTranscript {
+        RawTranscript(
+            text: "uncertain turbo result",
+            language: hints.language,
+            backend: .whisperKitLargeV3Turbo,
+            avgLogprob: -0.95
+        )
+    }
+
+    func cancel(sessionID: DictationSessionID) async {}
+}
+
+private actor NeverCompletingCoordinatorRecognizer: SpeechRecognizing {
+    private var transcriptions = 0
+    private var cancellations = 0
+
+    func transcribe(
+        _ audio: AudioInput,
+        hints: RecognitionHints,
+        sessionID: DictationSessionID
+    ) async throws -> RawTranscript {
+        transcriptions += 1
+        while true {
+            do {
+                try await Task.sleep(for: .seconds(3_600))
+            } catch {
+                // Deliberately ignore structured cancellation to exercise quarantine.
+            }
+        }
+    }
+
+    func cancel(sessionID: DictationSessionID) async {
+        cancellations += 1
+        while true {
+            try? await Task.sleep(for: .seconds(3_600))
+        }
+    }
+
+    func transcriptionCount() -> Int { transcriptions }
+    func cancellationCount() -> Int { cancellations }
+
 }
 
 private struct ImmediateRecognizer: SpeechRecognizing {

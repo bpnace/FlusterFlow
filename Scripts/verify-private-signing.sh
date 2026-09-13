@@ -14,12 +14,17 @@ KEYCHAIN="${FLUSTERFLOW_SIGNING_KEYCHAIN:-$HOME/Library/Keychains/FlusterFlowSig
 PASSWORD_FILE="${FLUSTERFLOW_SIGNING_PASSWORD_FILE:-$SIGNING_SUPPORT_DIR/keychain-password}"
 IDENTITY="${FLUSTERFLOW_CODE_SIGN_IDENTITY:-}"
 MODE="verify"
+EXPORT_APP=""
+EXPORT_STAGING_ROOT=""
 TEMP_ROOT=""
 VERIFIED_REQUIREMENT=""
 VERIFIED_GATEKEEPER=""
 VERIFIED_IDENTITY_CLASS=""
+VERIFIED_CDHASH=""
 VERIFICATION_FAILURE=""
 RELEASE_BUILD_COUNT=0
+ORIGINAL_USER_KEYCHAINS=()
+KEYCHAIN_SEARCH_LIST_CHANGED=false
 
 emit_prerequisite_status() {
   local status="$1"
@@ -38,21 +43,37 @@ usage() {
   cat <<'EOF'
 Usage:
   verify-private-signing.sh --check-prerequisites [--identity <40-hex-fingerprint>]
-  verify-private-signing.sh --identity <40-hex-fingerprint>
+  verify-private-signing.sh --identity <40-hex-fingerprint> [--export-app <absolute-path.app>]
 
 Instead of --identity, set FLUSTERFLOW_CODE_SIGN_IDENTITY to the same 40-character
 SHA-1 fingerprint reported for an already installed valid code-signing identity.
 The identity value is validated but never printed.
+When --export-app is present, the destination must not already exist. One of the
+two verified builds is copied there only after all cross-build checks pass.
 EOF
 }
 
 cleanup() {
   local status=$?
   trap - EXIT
+  if [ "$KEYCHAIN_SEARCH_LIST_CHANGED" = true ]; then
+    if ! /usr/bin/security list-keychains -d user -s "${ORIGINAL_USER_KEYCHAINS[@]}" >/dev/null 2>&1; then
+      if [ "$status" -eq 0 ]; then
+        status=1
+      fi
+    fi
+  fi
   if [ -n "$TEMP_ROOT" ] && [ -d "$TEMP_ROOT" ]; then
     case "$TEMP_ROOT" in
       /tmp/flusterflow-private-signing.*)
         /bin/rm -rf "$TEMP_ROOT"
+        ;;
+    esac
+  fi
+  if [ -n "$EXPORT_STAGING_ROOT" ] && [ -d "$EXPORT_STAGING_ROOT" ]; then
+    case "$(/usr/bin/basename "$EXPORT_STAGING_ROOT")" in
+      .flusterflow-verified-export.*)
+        /bin/rm -rf "$EXPORT_STAGING_ROOT"
         ;;
     esac
   fi
@@ -82,6 +103,18 @@ while [ "$#" -gt 0 ]; do
       IDENTITY="${1#--identity=}"
       shift
       ;;
+    --export-app)
+      if [ "$#" -lt 2 ]; then
+        emit_prerequisite_status "failed" "artifact_export_argument_missing"
+        exit 1
+      fi
+      EXPORT_APP="$2"
+      shift 2
+      ;;
+    --export-app=*)
+      EXPORT_APP="${1#--export-app=}"
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -93,7 +126,32 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for tool in /usr/bin/xcodebuild /usr/bin/codesign /usr/bin/security /usr/sbin/spctl /usr/bin/plutil /usr/bin/cmp /usr/libexec/PlistBuddy; do
+if [ -n "$EXPORT_APP" ]; then
+  if [ "$MODE" = "prerequisites" ]; then
+    emit_prerequisite_status "failed" "artifact_export_not_available_in_prerequisite_mode"
+    exit 1
+  fi
+  case "$EXPORT_APP" in
+    /*.app) ;;
+    *)
+      emit_prerequisite_status "failed" "artifact_export_path_invalid"
+      exit 1
+      ;;
+  esac
+  if [ -e "$EXPORT_APP" ] || [ -L "$EXPORT_APP" ]; then
+    emit_prerequisite_status "failed" "artifact_export_destination_exists"
+    exit 1
+  fi
+  EXPORT_PARENT="$(/usr/bin/dirname "$EXPORT_APP")"
+  if [ ! -d "$EXPORT_PARENT" ]; then
+    emit_prerequisite_status "failed" "artifact_export_parent_missing"
+    exit 1
+  fi
+  EXPORT_PARENT="$(cd "$EXPORT_PARENT" && pwd -P)"
+  EXPORT_APP="$EXPORT_PARENT/$(/usr/bin/basename "$EXPORT_APP")"
+fi
+
+for tool in /usr/bin/xcodebuild /usr/bin/codesign /usr/bin/security /usr/sbin/spctl /usr/bin/plutil /usr/bin/cmp /usr/bin/ditto /usr/libexec/PlistBuddy; do
   if [ ! -x "$tool" ]; then
     emit_prerequisite_status "failed" "required_tool_missing"
     exit 1
@@ -116,14 +174,25 @@ if [ -f "$KEYCHAIN" ] && [ -f "$PASSWORD_FILE" ]; then
     exit 77
   fi
 
-  KEYCHAINS=("$KEYCHAIN")
+  if ! USER_KEYCHAIN_LIST_OUTPUT="$(/usr/bin/security list-keychains -d user)"; then
+    emit_prerequisite_status "failed" "user_keychain_search_list_snapshot_failed"
+    exit 1
+  fi
   while IFS= read -r existing; do
     existing="${existing#*\"}"
     existing="${existing%\"*}"
+    if [ -n "$existing" ]; then
+      ORIGINAL_USER_KEYCHAINS+=("$existing")
+    fi
+  done <<<"$USER_KEYCHAIN_LIST_OUTPUT"
+
+  KEYCHAINS=("$KEYCHAIN")
+  for existing in "${ORIGINAL_USER_KEYCHAINS[@]}"; do
     if [ -n "$existing" ] && [ "$existing" != "$KEYCHAIN" ]; then
       KEYCHAINS+=("$existing")
     fi
-  done < <(/usr/bin/security list-keychains -d user)
+  done
+  KEYCHAIN_SEARCH_LIST_CHANGED=true
   /usr/bin/security list-keychains -d user -s "${KEYCHAINS[@]}"
 fi
 
@@ -208,6 +277,7 @@ verify_app() {
   VERIFIED_REQUIREMENT=""
   VERIFIED_GATEKEEPER=""
   VERIFIED_IDENTITY_CLASS=""
+  VERIFIED_CDHASH=""
 
   if [ ! -d "$app" ] || [ ! -f "$app/Contents/Info.plist" ]; then
     VERIFICATION_FAILURE="signed_app_missing"
@@ -234,6 +304,12 @@ verify_app() {
     VERIFICATION_FAILURE="ad_hoc_signature_rejected"
     return 1
   fi
+  VERIFIED_CDHASH="$(printf '%s\n' "$signature_metadata" | /usr/bin/sed -n 's/^CDHash=//p' | /usr/bin/head -n 1)"
+  if ! printf '%s' "$VERIFIED_CDHASH" | /usr/bin/grep -Eq '^[0-9A-Fa-f]{40,64}$'; then
+    VERIFICATION_FAILURE="code_directory_hash_missing"
+    return 1
+  fi
+  VERIFIED_CDHASH="$(printf '%s' "$VERIFIED_CDHASH" | /usr/bin/tr '[:lower:]' '[:upper:]')"
   authority_count="$(printf '%s\n' "$signature_metadata" | /usr/bin/awk '/^Authority=/{ count++ } END { print count + 0 }')"
   if [ "$authority_count" -eq 0 ]; then
     VERIFICATION_FAILURE="signing_authority_missing"
@@ -283,6 +359,7 @@ fi
 REQUIREMENT_ONE="$VERIFIED_REQUIREMENT"
 GATEKEEPER_ONE="$VERIFIED_GATEKEEPER"
 IDENTITY_CLASS_ONE="$VERIFIED_IDENTITY_CLASS"
+CDHASH_ONE="$VERIFIED_CDHASH"
 
 if ! verify_app "$APP_TWO" "$TEMP_ROOT/entitlements-two.raw" "$TEMP_ROOT/entitlements-two.xml"; then
   emit_failure "$VERIFICATION_FAILURE"
@@ -308,15 +385,42 @@ if [ "$IDENTITY_CLASS_ONE" != "$IDENTITY_CLASS_TWO" ]; then
   emit_failure "identity_class_mismatch"
   exit 1
 fi
-
-if [ "$GATEKEEPER_ONE" = "rejected_local_self_signed_boundary" ]; then
-  if [ "$IDENTITY_CLASS_ONE" != "local_self_signed" ]; then
-    emit_failure "gatekeeper_rejected_nonlocal_identity"
+if [ "$GATEKEEPER_ONE" = "rejected_local_self_signed_boundary" ] && \
+   [ "$IDENTITY_CLASS_ONE" != "local_self_signed" ]; then
+  emit_failure "gatekeeper_rejected_nonlocal_identity"
+  exit 1
+fi
+ARTIFACT_EXPORTED=false
+if [ -n "$EXPORT_APP" ]; then
+  EXPORT_STAGING_ROOT="$(/usr/bin/mktemp -d "$EXPORT_PARENT/.flusterflow-verified-export.XXXXXX")"
+  EXPORTED_STAGING_APP="$EXPORT_STAGING_ROOT/FlusterFlow.app"
+  if ! /usr/bin/ditto "$APP_ONE" "$EXPORTED_STAGING_APP"; then
+    emit_failure "artifact_export_copy_failed"
     exit 1
   fi
-  printf '%s\n' '{"schemaVersion":1,"gate":"G9","mode":"verification","status":"blocked","reason":"gatekeeper_local_self_signed_boundary","releaseBuilds":2,"bundleIdentifierMatch":true,"strictSignatureVerification":true,"hardenedRuntime":true,"entitlements":"audio_input_only","designatedRequirementMatch":true,"gatekeeper":"rejected_both","manualLaunchAndTCCRequired":true}'
+  if ! verify_app "$EXPORTED_STAGING_APP" "$TEMP_ROOT/entitlements-export.raw" "$TEMP_ROOT/entitlements-export.xml"; then
+    emit_failure "artifact_export_reverification_failed"
+    exit 1
+  fi
+  if [ "$VERIFIED_REQUIREMENT" != "$REQUIREMENT_ONE" ] || \
+     [ "$VERIFIED_GATEKEEPER" != "$GATEKEEPER_ONE" ] || \
+     [ "$VERIFIED_IDENTITY_CLASS" != "$IDENTITY_CLASS_ONE" ] || \
+     [ "$VERIFIED_CDHASH" != "$CDHASH_ONE" ]; then
+    emit_failure "artifact_export_identity_mismatch"
+    exit 1
+  fi
+  if ! /bin/mv "$EXPORTED_STAGING_APP" "$EXPORT_APP"; then
+    emit_failure "artifact_export_finalize_failed"
+    exit 1
+  fi
+  ARTIFACT_EXPORTED=true
+fi
+
+if [ "$GATEKEEPER_ONE" = "rejected_local_self_signed_boundary" ]; then
+  printf '{"schemaVersion":1,"gate":"G9","mode":"verification","status":"blocked","reason":"gatekeeper_local_self_signed_boundary","releaseBuilds":2,"bundleIdentifierMatch":true,"strictSignatureVerification":true,"hardenedRuntime":true,"entitlements":"audio_input_only","designatedRequirementMatch":true,"cdHash":"%s","artifactExported":%s,"gatekeeper":"rejected_both","manualLaunchAndTCCRequired":true}\n' \
+    "$CDHASH_ONE" "$ARTIFACT_EXPORTED"
   exit 77
 fi
 
-printf '{"schemaVersion":1,"gate":"G9","mode":"verification","status":"passed","releaseBuilds":2,"bundleIdentifierMatch":true,"strictSignatureVerification":true,"hardenedRuntime":true,"entitlements":"audio_input_only","designatedRequirementMatch":true,"identityClass":"%s","gatekeeper":"accepted_both","manualLaunchAndTCCRequired":true}\n' \
-  "$IDENTITY_CLASS_ONE"
+printf '{"schemaVersion":1,"gate":"G9","mode":"verification","status":"passed","releaseBuilds":2,"bundleIdentifierMatch":true,"strictSignatureVerification":true,"hardenedRuntime":true,"entitlements":"audio_input_only","designatedRequirementMatch":true,"cdHash":"%s","artifactExported":%s,"identityClass":"%s","gatekeeper":"accepted_both","manualLaunchAndTCCRequired":true}\n' \
+  "$CDHASH_ONE" "$ARTIFACT_EXPORTED" "$IDENTITY_CLASS_ONE"

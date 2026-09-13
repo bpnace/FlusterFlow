@@ -50,7 +50,7 @@ jq -e '
     "passed": false
   }]
 ' "$failure_report" >/dev/null
-if rg -q -F '/tmp/flusterflow-private-path-secret' "$failure_report"; then
+if grep -q -F '/tmp/flusterflow-private-path-secret' "$failure_report"; then
   echo "target harness exposed a scenario path in its failure report" >&2
   exit 1
 fi

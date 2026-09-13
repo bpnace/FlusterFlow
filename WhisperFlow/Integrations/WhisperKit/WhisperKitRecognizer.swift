@@ -74,6 +74,11 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
         let task: Task<Void, Error>
     }
 
+    private struct PrepareOperation: Sendable {
+        let id: UInt64
+        let task: Task<Void, Error>
+    }
+
     private let sampleAccess: any AudioSampleAccessing
     private let modelStore: any LocalModelChecking
     private let tokenizerStore: any LocalModelChecking
@@ -82,6 +87,8 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
     private let logger = Logger(subsystem: "local.flusterflow", category: "asr")
     private var runtimePrepared = false
     private var runtimePrewarmed = false
+    private var nextPrepareOperationID: UInt64 = 0
+    private var prepareOperation: PrepareOperation?
     private var nextPrewarmOperationID: UInt64 = 0
     private var prewarmOperation: PrewarmOperation?
     private var incrementalSessions: [DictationSessionID: IncrementalSession] = [:]
@@ -113,7 +120,9 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
             logFailure(Self.failureCode(for: error))
             throw error
         }
+        try Task.checkCancellation()
         let audioSamples = try await sampleAccess.samples(for: audio)
+        try Task.checkCancellation()
         guard audioSamples.sampleRate == AudioSamples.recognizerSampleRate,
               audioSamples.channelCount == 1 else {
             logFailure(.unsupportedAudioFormat)
@@ -129,6 +138,7 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
 
         let result: WhisperKitRecognitionResult
         do {
+            try Task.checkCancellation()
             result = try await runtime.transcribe(
                 samples: audioSamples.values,
                 language: Self.languageMode(for: hints.language),
@@ -165,6 +175,7 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
 
     func cancel(sessionID: DictationSessionID) async {
         incrementalSessions[sessionID] = nil
+        await cancelModelOperations()
         await runtime.cancel(sessionID: sessionID)
     }
 
@@ -226,6 +237,9 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
             try await awaitPrewarm(operation)
             return
         }
+        if let operation = prepareOperation {
+            try await awaitPrepare(operation)
+        }
 
         let modelDirectory = try await modelStore.validatedDirectory()
         let tokenizerDirectory = try await tokenizerStore.validatedDirectory()
@@ -233,6 +247,9 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
         if let operation = prewarmOperation {
             try await awaitPrewarm(operation)
             return
+        }
+        if let operation = prepareOperation {
+            try await awaitPrepare(operation)
         }
 
         nextPrewarmOperationID &+= 1
@@ -251,14 +268,9 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
 
     func unload() async {
         incrementalSessions.removeAll()
+        await cancelModelOperations()
         runtimePrepared = false
         runtimePrewarmed = false
-        let operation = prewarmOperation
-        prewarmOperation = nil
-        operation?.task.cancel()
-        if let operation {
-            _ = await operation.task.result
-        }
         await runtime.unload()
     }
 
@@ -268,6 +280,10 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
             try await awaitPrewarm(operation)
             return
         }
+        if let operation = prepareOperation {
+            try await awaitPrepare(operation)
+            return
+        }
         let modelDirectory = try await modelStore.validatedDirectory()
         let tokenizerDirectory = try await tokenizerStore.validatedDirectory()
         guard !runtimePrepared else { return }
@@ -275,16 +291,63 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
             try await awaitPrewarm(operation)
             return
         }
-        do {
+        if let operation = prepareOperation {
+            try await awaitPrepare(operation)
+            return
+        }
+
+        nextPrepareOperationID &+= 1
+        let operationID = nextPrepareOperationID
+        let runtime = runtime
+        let task = Task<Void, Error> {
             try await runtime.prepare(
                 modelDirectory: modelDirectory,
                 tokenizerDirectory: tokenizerDirectory
             )
-            runtimePrepared = true
+        }
+        let operation = PrepareOperation(id: operationID, task: task)
+        prepareOperation = operation
+        try await awaitPrepare(operation)
+    }
+
+    private func awaitPrepare(_ operation: PrepareOperation) async throws {
+        do {
+            try await operation.task.value
+            if prepareOperation?.id == operation.id {
+                runtimePrepared = true
+                prepareOperation = nil
+                return
+            }
+            guard runtimePrepared else { throw CancellationError() }
         } catch is CancellationError {
+            if prepareOperation?.id == operation.id {
+                prepareOperation = nil
+            }
             throw CancellationError()
         } catch {
+            if prepareOperation?.id == operation.id {
+                prepareOperation = nil
+            }
             throw WhisperKitRecognizerError.runtimePreparationFailed
+        }
+    }
+
+    private func cancelModelOperations() async {
+        let prepare = prepareOperation
+        let prewarm = prewarmOperation
+        prepare?.task.cancel()
+        prewarm?.task.cancel()
+        if let prepare {
+            _ = await prepare.task.result
+            if prepareOperation?.id == prepare.id {
+                prepareOperation = nil
+            }
+        }
+        if let prewarm {
+            _ = await prewarm.task.result
+            if prewarmOperation?.id == prewarm.id {
+                prewarmOperation = nil
+            }
         }
     }
 
@@ -362,10 +425,15 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
         }
     }
 
+    private struct ActiveTranscription: Sendable {
+        let token: UUID
+        let task: Task<WhisperKitRecognitionResult, Error>
+    }
+
     private var runtime: RuntimeBox?
     private var preparedModelDirectory: URL?
     private var preparedTokenizerDirectory: URL?
-    private var activeTasks: [DictationSessionID: Task<WhisperKitRecognitionResult, Error>] = [:]
+    private var activeTasks: [DictationSessionID: ActiveTranscription] = [:]
 
     func prepare(modelDirectory: URL, tokenizerDirectory: URL) async throws {
         let modelDirectory = modelDirectory.standardizedFileURL
@@ -416,9 +484,9 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
 
     func unload() async {
         let tasks = Array(activeTasks.values)
-        tasks.forEach { $0.cancel() }
-        for task in tasks {
-            _ = await task.result
+        tasks.forEach { $0.task.cancel() }
+        for active in tasks {
+            _ = await active.task.result
         }
         activeTasks.removeAll()
         if let runtime {
@@ -476,7 +544,7 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
 
         let options = Self.decodingOptions(language: language, promptTokens: promptTokens)
 
-        let task = Task<WhisperKitRecognitionResult, Error> {
+        return try await runTrackedTranscription(sessionID: sessionID) {
             let results = try await runtime.whisperKit.transcribe(
                 audioArray: samples,
                 decodeOptions: options
@@ -484,15 +552,33 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
             try Task.checkCancellation()
             return Self.recognitionResult(from: results)
         }
-        activeTasks[sessionID] = task
-        defer { activeTasks[sessionID] = nil }
-        return try await task.value
     }
 
     func cancel(sessionID: DictationSessionID) async {
-        guard let task = activeTasks[sessionID] else { return }
-        task.cancel()
-        _ = await task.result
+        guard let active = activeTasks[sessionID] else { return }
+        active.task.cancel()
+        _ = await active.task.result
+        removeActiveTask(active, for: sessionID)
+    }
+
+    func runTrackedTranscription(
+        sessionID: DictationSessionID,
+        operation: @escaping @Sendable () async throws -> WhisperKitRecognitionResult
+    ) async throws -> WhisperKitRecognitionResult {
+        let active = ActiveTranscription(
+            token: UUID(),
+            task: Task(operation: operation)
+        )
+        activeTasks[sessionID] = active
+        defer { removeActiveTask(active, for: sessionID) }
+        return try await active.task.value
+    }
+
+    private func removeActiveTask(
+        _ active: ActiveTranscription,
+        for sessionID: DictationSessionID
+    ) {
+        guard activeTasks[sessionID]?.token == active.token else { return }
         activeTasks[sessionID] = nil
     }
 

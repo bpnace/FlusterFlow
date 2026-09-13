@@ -21,21 +21,21 @@ final class TextRewriteCoreTests: XCTestCase {
     func testMeaningValidatorRejectsLostAnchorsInventedClaimsContextLossAndLargeDeviation() {
         let validator = MeaningPreservationRewriteValidator()
         let request = makeRequest(
-            text: "Bitte sende den Link https://example.com an Alex Mercer für PROJECT-ORBIT nicht morgen.",
+            text: "Bitte sende den Link https://example.com an Testperson Alpha für PROJECT-ORBIT nicht morgen.",
             protectedTerms: ["PROJECT-ORBIT"]
         )
 
         let lostAnchor = validator.validate(
             request: request,
-            proposedText: "Bitte sende den Link https://evil.example an Alex Mercer für PROJECT-ORBIT nicht morgen."
+            proposedText: "Bitte sende den Link https://evil.example an Testperson Alpha für PROJECT-ORBIT nicht morgen."
         )
         let inventedClaim = validator.validate(
             request: request,
-            proposedText: "Bitte sende den Link https://example.com an Alex Mercer und Maria Sommer für PROJECT-ORBIT nicht morgen."
+            proposedText: "Bitte sende den Link https://example.com an Testperson Alpha und Testperson Beta für PROJECT-ORBIT nicht morgen."
         )
         let contextLoss = validator.validate(
             request: request,
-            proposedText: "Bitte sende den Link https://example.com an Alex Mercer nicht morgen."
+            proposedText: "Bitte sende den Link https://example.com an Testperson Alpha nicht morgen."
         )
         let deviation = validator.validate(
             request: request,

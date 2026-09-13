@@ -110,6 +110,18 @@ final class SettingsStorePrivacyTests: XCTestCase, @unchecked Sendable {
     }
 
     @MainActor
+    func testHandsFreeDefaultsDisabledAndPersistsExplicitEnable() {
+        withIsolatedDefaults { defaults in
+            let settings = SettingsStore(defaults: defaults)
+            XCTAssertFalse(settings.handsFreeEnabled)
+
+            settings.handsFreeEnabled = true
+
+            XCTAssertTrue(SettingsStore(defaults: defaults).handsFreeEnabled)
+        }
+    }
+
+    @MainActor
     func testLocalCorrectionLearningDefaultsEnabledAndPersistsExplicitDisable() {
         withIsolatedDefaults { defaults in
             let settings = SettingsStore(defaults: defaults)

@@ -9,8 +9,12 @@ AUDIO_FILE=""
 GENERATED_AUDIO_FILE=""
 SMOKE_XCTESTRUN=""
 SMOKE_RESULT=""
-SMOKE_TEST_NAME="testInstalledAdaptiveWhisperRunsTheProductASRPathWhenExplicitlyRequested"
-SMOKE_TEST_IDENTIFIER="WhisperFlowTests/WhisperKitRecognizerTests/$SMOKE_TEST_NAME"
+SMOKE_ARTIFACT_ROOT=""
+SMOKE_TEST_NAMES=(
+  "testInstalledWhisperTurboStreamsAndFinalizesAudioWhenExplicitlyRequested"
+  "testInstalledWhisperLargeFinalizesAudioWhenExplicitlyRequested"
+  "testInstalledAdaptiveWhisperRunsTheProductASRPathWhenExplicitlyRequested"
+)
 
 cleanup() {
   if [ -n "$GENERATED_AUDIO_FILE" ]; then
@@ -22,13 +26,21 @@ cleanup() {
   if [ -n "$SMOKE_RESULT" ]; then
     rm -f "$SMOKE_RESULT"
   fi
+  if [ -n "$SMOKE_ARTIFACT_ROOT" ] && [ -d "$SMOKE_ARTIFACT_ROOT" ]; then
+    case "$SMOKE_ARTIFACT_ROOT" in
+      /tmp/flusterflow-product-asr-artifacts.*)
+        rm -rf "$SMOKE_ARTIFACT_ROOT"
+        ;;
+    esac
+  fi
 }
 trap cleanup EXIT
 
 product_asr_smoke_passed() {
   local result_file="$1"
+  local test_name="$2"
 
-  if awk -v test="$SMOKE_TEST_NAME" '
+  if awk -v test="$test_name" '
     index($0, test) > 0 {
       line = tolower($0)
       if (line ~ /(skip|skipped|not[ -]?run|not executed)/) {
@@ -40,7 +52,7 @@ product_asr_smoke_passed() {
     return 1
   fi
 
-  awk -v test="$SMOKE_TEST_NAME" '
+  awk -v test="$test_name" '
     index($0, test) > 0 {
       line = tolower($0)
       if (line ~ /(passed|succeeded)/) {
@@ -49,6 +61,14 @@ product_asr_smoke_passed() {
     }
     END { exit(found ? 0 : 1) }
   ' "$result_file"
+}
+
+absolute_audio_path() {
+  local input_path="$1"
+  local input_directory
+
+  input_directory="$(cd "$(dirname "$input_path")" && pwd -P)"
+  printf '%s/%s\n' "$input_directory" "$(basename "$input_path")"
 }
 
 if [ "${FLUSTERFLOW_PRODUCT_ASR_ACCEPTANCE_SOURCE_ONLY:-0}" = "1" ]; then
@@ -64,11 +84,11 @@ fi
 # streaming/finalization lifecycle, both installed Whisper recognizers, and the
 # adaptive product router without storing user audio or text.
 if [ "$#" -eq 1 ]; then
-  AUDIO_FILE="$1"
-  if [ ! -f "$AUDIO_FILE" ]; then
-    echo "Product ASR acceptance failed: local audio file missing." >&2
+  if [ ! -f "$1" ]; then
+    echo "Installed-model recognizer acceptance failed: local audio file missing." >&2
     exit 66
   fi
+  AUDIO_FILE="$(absolute_audio_path "$1")"
 else
   GENERATED_AUDIO_FILE="$(mktemp /tmp/flusterflow-product-asr.XXXXXX.aiff)"
   AUDIO_FILE="$GENERATED_AUDIO_FILE"
@@ -88,7 +108,7 @@ fi
 
 XCTESTRUN="$(find "$DERIVED_DATA/Build/Products" -maxdepth 1 -name '*.xctestrun' -print -quit)"
 if [ -z "$XCTESTRUN" ]; then
-  echo "Product ASR acceptance failed: xctestrun artifact missing." >&2
+  echo "Installed-model recognizer acceptance failed: xctestrun artifact missing." >&2
   exit 1
 fi
 
@@ -103,15 +123,25 @@ if ! /usr/libexec/PlistBuddy \
 fi
 
 SMOKE_RESULT="$(mktemp /tmp/flusterflow-product-asr-result.XXXXXX)"
+SMOKE_ARTIFACT_ROOT="$(mktemp -d /tmp/flusterflow-product-asr-artifacts.XXXXXX)"
+ONLY_TESTING_ARGUMENTS=()
+for test_name in "${SMOKE_TEST_NAMES[@]}"; do
+  ONLY_TESTING_ARGUMENTS+=(
+    "-only-testing:WhisperFlowTests/WhisperKitRecognizerTests/$test_name"
+  )
+done
 /usr/bin/xcodebuild \
   -xctestrun "$SMOKE_XCTESTRUN" \
   -destination 'platform=macOS,arch=arm64' \
-  -only-testing:"$SMOKE_TEST_IDENTIFIER" \
+  -resultBundlePath "$SMOKE_ARTIFACT_ROOT/result.xcresult" \
+  "${ONLY_TESTING_ARGUMENTS[@]}" \
   test-without-building | tee "$SMOKE_RESULT"
 
-if ! product_asr_smoke_passed "$SMOKE_RESULT"; then
-  echo "Product ASR acceptance failed: the real model smoke did not execute successfully." >&2
-  exit 1
-fi
+for test_name in "${SMOKE_TEST_NAMES[@]}"; do
+  if ! product_asr_smoke_passed "$SMOKE_RESULT" "$test_name"; then
+    echo "Installed-model recognizer acceptance failed: $test_name did not execute successfully." >&2
+    exit 1
+  fi
+done
 
-echo "FlusterFlow product ASR acceptance: PASS"
+echo "FlusterFlow installed-model recognizer acceptance: PASS"

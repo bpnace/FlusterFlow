@@ -51,7 +51,9 @@ actor FluidAudioRecognizer: SpeechRecognizing {
         sessionID: DictationSessionID
     ) async throws -> RawTranscript {
         try await prepareIfNeeded()
+        try Task.checkCancellation()
         let audioSamples = try await sampleAccess.samples(for: audio)
+        try Task.checkCancellation()
         guard audioSamples.sampleRate == AudioSamples.recognizerSampleRate,
               audioSamples.channelCount == 1 else {
             throw FluidAudioRecognizerError.unsupportedAudioFormat(
@@ -66,6 +68,7 @@ actor FluidAudioRecognizer: SpeechRecognizing {
         let languageMode = Self.languageMode(for: hints.language)
         let text: String
         do {
+            try Task.checkCancellation()
             text = try await runtime.transcribe(
                 samples: audioSamples.values,
                 language: languageMode,
@@ -92,8 +95,10 @@ actor FluidAudioRecognizer: SpeechRecognizing {
     private func prepareIfNeeded() async throws {
         guard !runtimePrepared else { return }
         let modelDirectory = try await modelStore.validatedDirectory()
+        try Task.checkCancellation()
         do {
             try await runtime.prepare(modelDirectory: modelDirectory)
+            try Task.checkCancellation()
             runtimePrepared = true
         } catch is CancellationError {
             throw CancellationError()
@@ -115,9 +120,14 @@ actor FluidAudioRecognizer: SpeechRecognizing {
 }
 
 actor OfflineFluidAudioRuntime: FluidAudioRuntimeServing {
+    private struct ActiveTranscription: Sendable {
+        let token: UUID
+        let task: Task<String, Error>
+    }
+
     private var manager: AsrManager?
     private var preparedDirectory: URL?
-    private var activeTasks: [DictationSessionID: Task<String, Error>] = [:]
+    private var activeTasks: [DictationSessionID: ActiveTranscription] = [:]
 
     init() {
         // This is set before any FluidAudio model/runtime call. FluidAudio's
@@ -170,7 +180,7 @@ actor OfflineFluidAudioRuntime: FluidAudioRuntimeServing {
         }
 
         let decoderLayers = await manager.decoderLayerCount
-        let task = Task<String, Error> {
+        return try await runTrackedTranscription(sessionID: sessionID) {
             var decoderState = try TdtDecoderState(decoderLayers: decoderLayers)
             let result = try await manager.transcribe(
                 samples,
@@ -179,12 +189,33 @@ actor OfflineFluidAudioRuntime: FluidAudioRuntimeServing {
             )
             return result.text
         }
-        activeTasks[sessionID] = task
-        defer { activeTasks[sessionID] = nil }
-        return try await task.value
     }
 
-    func cancel(sessionID: DictationSessionID) {
-        activeTasks.removeValue(forKey: sessionID)?.cancel()
+    func cancel(sessionID: DictationSessionID) async {
+        guard let active = activeTasks[sessionID] else { return }
+        active.task.cancel()
+        _ = await active.task.result
+        removeActiveTask(active, for: sessionID)
+    }
+
+    func runTrackedTranscription(
+        sessionID: DictationSessionID,
+        operation: @escaping @Sendable () async throws -> String
+    ) async throws -> String {
+        let active = ActiveTranscription(
+            token: UUID(),
+            task: Task(operation: operation)
+        )
+        activeTasks[sessionID] = active
+        defer { removeActiveTask(active, for: sessionID) }
+        return try await active.task.value
+    }
+
+    private func removeActiveTask(
+        _ active: ActiveTranscription,
+        for sessionID: DictationSessionID
+    ) {
+        guard activeTasks[sessionID]?.token == active.token else { return }
+        activeTasks[sessionID] = nil
     }
 }

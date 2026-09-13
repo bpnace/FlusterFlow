@@ -138,7 +138,7 @@ ARCHIVE_PASSWORD="$(/usr/bin/uuidgen)$(/usr/bin/uuidgen)"
   -sha256 \
   -days 3650 \
   -nodes \
-  -subj "/CN=$LABEL/O=Alex Mercer/OU=Private Development" \
+  -subj "/CN=$LABEL/O=FlusterFlow Local Development/OU=Private Signing" \
   -addext "basicConstraints=critical,CA:TRUE" \
   -addext "keyUsage=critical,digitalSignature,keyCertSign" \
   -addext "extendedKeyUsage=critical,codeSigning" \

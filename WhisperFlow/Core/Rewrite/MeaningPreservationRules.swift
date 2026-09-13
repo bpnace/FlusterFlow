@@ -218,13 +218,16 @@ struct ContextSupportedMeaningPreservationRules: Sendable {
         let localTokens = lexicalTokens(in: local)
         let proposedTokens = lexicalTokens(in: proposed)
         guard localTokens.count == proposedTokens.count else { return false }
-        return zip(localTokens, proposedTokens).allSatisfy { left, right in
-            left == right || (
-                min(left.count, right.count) >= 3
-                    && abs(left.count - right.count) <= 2
-                    && editDistance(left, right) <= max(1, min(left.count, right.count) / 4)
-            )
+        for (left, right) in zip(localTokens, proposedTokens) {
+            if left == right { continue }
+            let shorterCount = min(left.count, right.count)
+            guard shorterCount >= 3,
+                  abs(left.count - right.count) <= 2,
+                  editDistance(left, right) <= max(1, shorterCount / 4) else {
+                return false
+            }
         }
+        return true
     }
 
     private func namedEntities(in text: String) -> Set<String> {

@@ -96,6 +96,7 @@ public enum CanaryScanError: Error, Equatable, Sendable {
     case entryUnreadable(rootLabel: String)
     case fileLimitExceeded(rootLabel: String)
     case fileSizeLimitExceeded(rootLabel: String)
+    case totalByteLimitExceeded(rootLabel: String)
 
     public var contentFreeLimitation: String {
         switch self {
@@ -111,6 +112,8 @@ public enum CanaryScanError: Error, Equatable, Sendable {
             "Canary scan incomplete: file limit exceeded at \(label)."
         case .fileSizeLimitExceeded(let label):
             "Canary scan incomplete: file-size limit exceeded at \(label)."
+        case .totalByteLimitExceeded(let label):
+            "Canary scan incomplete: total-byte limit exceeded at \(label)."
         }
     }
 }
@@ -129,18 +132,36 @@ public struct CanaryLeakScanner: Sendable {
     }
 
     private let maximumFiles: Int
-    private let maximumFileSize: Int
+    private let maximumFileSize: Int64
+    private let maximumTotalBytes: Int64
+    private let chunkSize: Int
 
-    public init(maximumFiles: Int = 5_000, maximumFileSize: Int = 8 * 1_024 * 1_024) {
+    public init(
+        maximumFiles: Int = 5_000,
+        maximumFileSize: Int64 = 512 * 1_024 * 1_024,
+        maximumTotalBytes: Int64 = 4 * 1_024 * 1_024 * 1_024,
+        chunkSize: Int = 1 * 1_024 * 1_024
+    ) {
+        precondition(maximumFiles > 0)
+        precondition(maximumFileSize > 0)
+        precondition(maximumTotalBytes > 0)
+        precondition(chunkSize > 0)
         self.maximumFiles = maximumFiles
         self.maximumFileSize = maximumFileSize
+        self.maximumTotalBytes = maximumTotalBytes
+        self.chunkSize = chunkSize
     }
 
     public func scan(canary: String, roots: [Root]) throws -> [PrivacyLeak] {
-        guard !canary.isEmpty else { return [] }
-        let needle = Data(canary.utf8)
+        try scan(canaries: [canary], roots: roots)
+    }
+
+    public func scan(canaries: some Sequence<String>, roots: [Root]) throws -> [PrivacyLeak] {
+        let needles = Array(Set(canaries.filter { !$0.isEmpty })).map { Data($0.utf8) }
+        guard !needles.isEmpty else { return [] }
         var leaks: [PrivacyLeak] = []
         var visited = 0
+        var totalBytes: Int64 = 0
 
         for root in roots {
             let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey]
@@ -196,16 +217,21 @@ public struct CanaryLeakScanner: Sendable {
                 guard let size = values.fileSize else {
                     throw CanaryScanError.entryUnreadable(rootLabel: root.label)
                 }
-                guard size <= maximumFileSize else {
+                let fileSize = Int64(size)
+                guard fileSize <= maximumFileSize else {
                     throw CanaryScanError.fileSizeLimitExceeded(rootLabel: root.label)
                 }
-                let data: Data
-                do {
-                    data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
-                } catch {
-                    throw CanaryScanError.entryUnreadable(rootLabel: root.label)
+                let (nextTotal, overflowed) = totalBytes.addingReportingOverflow(fileSize)
+                guard !overflowed, nextTotal <= maximumTotalBytes else {
+                    throw CanaryScanError.totalByteLimitExceeded(rootLabel: root.label)
                 }
-                guard data.range(of: needle) != nil else { continue }
+                totalBytes = nextTotal
+                guard try fileContainsAnyNeedle(
+                    at: fileURL,
+                    fileSize: size,
+                    needles: needles,
+                    rootLabel: root.label
+                ) else { continue }
                 leaks.append(PrivacyLeak(kind: root.kind, location: root.label))
             }
             if traversalFailed {
@@ -214,5 +240,45 @@ public struct CanaryLeakScanner: Sendable {
         }
 
         return leaks
+    }
+
+    private func fileContainsAnyNeedle(
+        at url: URL,
+        fileSize: Int,
+        needles: [Data],
+        rootLabel: String
+    ) throws -> Bool {
+        if fileSize <= chunkSize {
+            do {
+                let data = try Data(contentsOf: url)
+                return needles.contains { data.range(of: $0) != nil }
+            } catch {
+                throw CanaryScanError.entryUnreadable(rootLabel: rootLabel)
+            }
+        }
+
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: url)
+        } catch {
+            throw CanaryScanError.entryUnreadable(rootLabel: rootLabel)
+        }
+        defer { try? handle.close() }
+
+        let overlapCount = max(needles.map(\.count).max() ?? 1, 1) - 1
+        var overlap = Data()
+        do {
+            while let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty {
+                var searchable = overlap
+                searchable.append(chunk)
+                if needles.contains(where: { searchable.range(of: $0) != nil }) {
+                    return true
+                }
+                overlap = Data(searchable.suffix(overlapCount))
+            }
+        } catch {
+            throw CanaryScanError.entryUnreadable(rootLabel: rootLabel)
+        }
+        return false
     }
 }

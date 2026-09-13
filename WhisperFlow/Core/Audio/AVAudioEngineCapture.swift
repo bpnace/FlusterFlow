@@ -251,13 +251,16 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         for snapshot: RealtimeCaptureBuffer.Snapshot,
         terminalError: AudioCaptureError?
     ) -> AudioCaptureError? {
-        if snapshot.maximumDurationExceeded
-            || snapshot.failure == .maximumDurationExceeded {
+        if (snapshot.maximumDurationExceeded
+            || snapshot.failure == .maximumDurationExceeded),
+           snapshot.chunks.isEmpty {
             return .maximumDurationExceeded
         }
         switch snapshot.failure {
         case .maximumDurationExceeded:
-            return .maximumDurationExceeded
+            // The realtime buffer already contains the complete bounded prefix.
+            // Finalize it instead of turning a healthy 120-second recording into loss.
+            break
         case .unsupportedBuffer, .writerDidNotQuiesce:
             return .normalizationFailed
         case .formatChanged:

@@ -83,6 +83,59 @@ final class PrivacyHarnessCoreTests: XCTestCase {
         }
     }
 
+    func testCanaryScannerFindsCanaryInLargeFileWithoutLoadingItWhole() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canary = "synthetic-private-canary"
+        var contents = Data(repeating: 0x61, count: 160)
+        contents.append(Data(canary.utf8))
+        contents.append(Data(repeating: 0x62, count: 160))
+        try contents.write(to: root.appendingPathComponent("large"))
+
+        let leaks = try CanaryLeakScanner(chunkSize: 32).scan(
+            canaries: ["another-canary", canary, "third-canary"],
+            roots: [.init(url: root, kind: .cacheFile, label: "test-cache")]
+        )
+
+        XCTAssertEqual(leaks, [PrivacyLeak(kind: .cacheFile, location: "test-cache")])
+    }
+
+    func testCanaryScannerFindsCanaryAcrossChunkBoundary() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canary = "boundary-canary"
+        var contents = Data(repeating: 0x61, count: 29)
+        contents.append(Data(canary.utf8))
+        contents.append(Data(repeating: 0x62, count: 32))
+        try contents.write(to: root.appendingPathComponent("chunked"))
+
+        let leaks = try CanaryLeakScanner(chunkSize: 32).scan(
+            canaries: [canary],
+            roots: [.init(url: root, kind: .diagnosticFile, label: "test-diagnostics")]
+        )
+
+        XCTAssertEqual(leaks, [PrivacyLeak(kind: .diagnosticFile, location: "test-diagnostics")])
+    }
+
+    func testCanaryScannerFailsClosedWhenTotalByteLimitWouldTruncateScan() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(repeating: 0x61, count: 6).write(to: root.appendingPathComponent("first"))
+        try Data(repeating: 0x62, count: 6).write(to: root.appendingPathComponent("second"))
+
+        XCTAssertThrowsError(
+            try CanaryLeakScanner(maximumTotalBytes: 10).scan(
+                canaries: ["synthetic-private-canary"],
+                roots: [.init(url: root, kind: .diagnosticFile, label: "test-diagnostics")]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CanaryScanError,
+                .totalByteLimitExceeded(rootLabel: "test-diagnostics")
+            )
+        }
+    }
+
     func testCanaryScannerFailsClosedWhenFileLimitWouldTruncateScan() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
