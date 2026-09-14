@@ -1009,19 +1009,22 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
             tokenizerStore: tokenizerStore,
             backend: .whisperKitLargeV3
         )
-        let recognizer = AdaptiveWhisperKitRecognizer(turbo: turbo, large: large)
+        let adaptive = AdaptiveWhisperKitRecognizer(turbo: turbo, large: large)
+        let recognizer = SessionModelSpeechRecognizer(recognizers: [.adaptive: adaptive])
         let sessionID = DictationSessionID(rawValue: 9_006)
+        await recognizer.register(.adaptive, for: sessionID)
         let hints = RecognitionHints(
             language: .german,
             terms: [],
             prioritizedLexiconTerms: ["FlusterFlow"]
         )
 
-        try await recognizer.startRecognitionSession(hints: hints, sessionID: sessionID)
-        _ = try await recognizer.updateRecognitionSession(
-            with: RecognitionAudioChunk(samples: audio.values),
-            sessionID: sessionID
-        )
+        // Match an early key release: preparation is still running when
+        // capture stops. The final decode must wait instead of returning busy.
+        let startup = Task {
+            try await recognizer.startRecognitionSession(hints: hints, sessionID: sessionID)
+        }
+        try await Task.sleep(for: .milliseconds(20))
         await recognizer.stopRecognitionSession(sessionID: sessionID)
 
         let input = await samples.store(audio)
@@ -1030,6 +1033,7 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
             hints: hints,
             sessionID: sessionID
         )
+        do { try await startup.value } catch is CancellationError {}
         await samples.release(input)
 
         XCTAssertFalse(transcript.text.isEmpty)

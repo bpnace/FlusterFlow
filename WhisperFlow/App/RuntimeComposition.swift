@@ -617,31 +617,32 @@ struct EphemeralFallbackResult: Equatable, Sendable, Identifiable {
 }
 
 actor EphemeralResultStore: EphemeralTextPreserving {
-    private var result: EphemeralFallbackResult?
+    private var results: [DictationSessionID: EphemeralFallbackResult] = [:]
+    private var order: [DictationSessionID] = []
     private var finalizedSessions: Set<DictationSessionID> = []
     private var finalizationOrder: [DictationSessionID] = []
 
     func preserveRawTranscript(_ text: String, for sessionID: DictationSessionID) {
         guard !text.isEmpty,
-              !finalizedSessions.contains(sessionID),
-              result == nil || result?.sessionID == sessionID else {
+              !finalizedSessions.contains(sessionID) else {
             return
         }
-        result = EphemeralFallbackResult(
+        if results[sessionID] == nil { order.append(sessionID) }
+        results[sessionID] = EphemeralFallbackResult(
             sessionID: sessionID,
             rawTranscript: text,
-            candidateText: result?.candidateText
+            candidateText: results[sessionID]?.candidateText
         )
     }
 
     func preserveCandidate(_ text: String, for sessionID: DictationSessionID) {
         guard !text.isEmpty,
               !finalizedSessions.contains(sessionID),
-              let current = result,
+              let current = results[sessionID],
               current.sessionID == sessionID else {
             return
         }
-        result = EphemeralFallbackResult(
+        results[sessionID] = EphemeralFallbackResult(
             sessionID: sessionID,
             rawTranscript: current.rawTranscript,
             candidateText: text
@@ -657,30 +658,31 @@ actor EphemeralResultStore: EphemeralTextPreserving {
     }
 
     func oldest() -> EphemeralFallbackResult? {
-        result
+        order.first.flatMap { results[$0] }
+    }
+
+    func all() -> [EphemeralFallbackResult] {
+        order.compactMap { results[$0] }
     }
 
     @discardableResult
     func discard(sessionID: DictationSessionID) -> Bool {
-        let didDiscard = result?.sessionID == sessionID
+        let didDiscard = results[sessionID] != nil
         finalize(sessionID)
         return didDiscard
     }
 
     func removeAll() {
-        if let sessionID = result?.sessionID {
-            finalize(sessionID)
-        }
+        for sessionID in order { finalize(sessionID) }
     }
 
     func count() -> Int {
-        result == nil ? 0 : 1
+        results.count
     }
 
     private func finalize(_ sessionID: DictationSessionID) {
-        if result?.sessionID == sessionID {
-            result = nil
-        }
+        results[sessionID] = nil
+        order.removeAll { $0 == sessionID }
         if finalizedSessions.insert(sessionID).inserted {
             finalizationOrder.append(sessionID)
         }

@@ -343,8 +343,9 @@ final class RecordingHistoryViewModelTests: XCTestCase {
         XCTAssertEqual(countWhilePaused, 1)
 
         await backend.resume()
-        for _ in 0 ..< 100 where viewModel.isWorking {
-            await Task.yield()
+        let completionDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while viewModel.isWorking, ContinuousClock.now < completionDeadline {
+            try await Task.sleep(for: .milliseconds(10))
         }
 
         XCTAssertFalse(viewModel.isWorking)

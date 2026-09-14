@@ -114,6 +114,7 @@ final class AppCompositionIntegrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(source.contains(".padding(.vertical, 20)"))
     }
 
+    @MainActor
     func testLocalPipelineExtractsTermsCorrectsCleanupAndPreservesSafeFallback() async throws {
         let recognizer = RecordingRecognizer(text: "flusterflov arbeitet lokal")
         let fallback = EphemeralResultStore()
@@ -149,6 +150,10 @@ final class AppCompositionIntegrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(result?.rawTranscript, "flusterflov arbeitet lokal")
         XCTAssertEqual(result?.candidateText, "FlusterFlow arbeitet lokal.")
         XCTAssertEqual(fallbackCount, 1)
+        let recovery = DictationRecoveryModel()
+        await recovery.handle(outcome, store: fallback)
+        XCTAssertEqual(recovery.results.first?.text, "FlusterFlow arbeitet lokal.")
+        XCTAssertTrue(recovery.needsAttention)
     }
 
     func testAccessibilityDenialBlocksDirectDictation() {
@@ -282,7 +287,7 @@ final class AppCompositionIntegrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(cancellationCounts, [1, 1, 1, 1, 1])
     }
 
-    func testEphemeralFallbackIsSingleSlotUntilExplicitDiscard() async {
+    func testEphemeralFallbackRetainsEachSessionUntilExplicitDiscard() async {
         let store = EphemeralResultStore()
         let first = DictationSessionID(rawValue: 1)
         let second = DictationSessionID(rawValue: 2)
@@ -296,7 +301,7 @@ final class AppCompositionIntegrationTests: XCTestCase, @unchecked Sendable {
         await store.preserveCandidate("late candidate", for: first)
         let afterDiscard = await store.oldest()
 
-        XCTAssertEqual(count, 1)
+        XCTAssertEqual(count, 2)
         XCTAssertEqual(
             stored,
             EphemeralFallbackResult(
@@ -306,7 +311,7 @@ final class AppCompositionIntegrationTests: XCTestCase, @unchecked Sendable {
             )
         )
         XCTAssertTrue(discarded)
-        XCTAssertNil(afterDiscard)
+        XCTAssertEqual(afterDiscard?.sessionID, second)
     }
 
     func testConfirmedInsertionClearsRawAndCandidateAndRejectsLateWrites() async {
@@ -409,7 +414,13 @@ final class AppCompositionIntegrationTests: XCTestCase, @unchecked Sendable {
             XCTAssertTrue(sources.contains("stage: .\(stage.rawValue)"), stage.rawValue)
         }
         XCTAssertFalse(sources.contains("stage: .audioCapture"))
-        XCTAssertFalse(sources.contains("stage: .recognition"))
+        // Domain failure stages are distinct from the diagnostic vocabulary.
+        let metricSources = sources.replacingOccurrences(
+            of: "DictationFailure\\([^\\)]*\\)",
+            with: "",
+            options: .regularExpression
+        )
+        XCTAssertFalse(metricSources.contains("stage: .recognition"))
         XCTAssertFalse(sources.contains("stage: .enrichment"))
     }
 

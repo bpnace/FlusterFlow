@@ -130,7 +130,8 @@ final class RecordingHistoryViewModel: ObservableObject {
                 TranscriptVersion(
                     backend: transcript.backend?.rawValue ?? modelChoice.rawValue,
                     language: transcript.language,
-                    text: transcript.text
+                    text: transcript.text,
+                    kind: .retranscribed
                 ),
                 to: entry.id
             )
@@ -398,12 +399,32 @@ struct RecordingHistoryView: View {
                     )
                 )
             } else {
+                if let preferred = entry.preferredTranscript {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Aktuelles Transkript").font(.headline)
+                            Spacer()
+                            Button("Kopieren") { copyTranscript(preferred.text) }
+                        }
+                        Text(preferred.kind.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(preferred.text).textSelection(.enabled)
+                    }
+                }
                 List(entry.transcripts.reversed(), id: \.version) { version in
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("Version \(version.version)").font(.headline)
                             Spacer()
-                            Text(version.backend).font(.caption).foregroundStyle(.secondary)
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(version.kind.title)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(version.backend)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         Text(version.text).textSelection(.enabled)
                     }
@@ -494,6 +515,11 @@ struct RecordingHistoryView: View {
         let versions = entry.transcripts.count == 1 ? "1 Version" : "\(entry.transcripts.count) Versionen"
         return "\(entry.state.title) · \(duration) · \(versions)"
     }
+
+    private func copyTranscript(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
 }
 
 private extension RecordingHistoryState {
@@ -505,6 +531,16 @@ private extension RecordingHistoryState {
         case .completed: "Abgeschlossen"
         case .failed: "Erneut versuchen"
         case .interrupted: "Unterbrochen"
+        }
+    }
+}
+
+private extension TranscriptVersionKind {
+    var title: String {
+        switch self {
+        case .raw: "Rohtext"
+        case .final: "Korrigierter Text"
+        case .retranscribed: "Erneut erkannt"
         }
     }
 }

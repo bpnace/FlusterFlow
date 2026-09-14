@@ -220,7 +220,9 @@ final class RealtimeCaptureBufferTests: XCTestCase {
 
     func testEveryLifecyclePathUsesCentralSealBeforeTapRemoval() throws {
         let source = try captureSource()
-        let stopStart = try XCTUnwrap(source.range(of: "private func stopEngine()"))
+        let stopStart = try XCTUnwrap(
+            source.range(of: "private func stopCurrentSegment() async")
+        )
         let clearStart = try XCTUnwrap(
             source.range(
                 of: "private func clearSession()",
@@ -228,14 +230,13 @@ final class RealtimeCaptureBufferTests: XCTestCase {
             )
         )
         let stopBody = String(source[stopStart.lowerBound..<clearStart.lowerBound])
-        let seal = try XCTUnwrap(stopBody.range(of: "accumulator?.seal()"))
         let removeTap = try XCTUnwrap(stopBody.range(of: "removeTap"))
+        let seal = try XCTUnwrap(stopBody.range(of: "activeQueue?.seal()"))
         let stop = try XCTUnwrap(stopBody.range(of: "engine.stop()"))
 
-        XCTAssertLessThan(seal.lowerBound, removeTap.lowerBound)
-        XCTAssertLessThan(removeTap.lowerBound, stop.lowerBound)
-        XCTAssertTrue(source.contains("preserveCurrentAccumulator()"))
-        XCTAssertTrue(source.contains("completedAccumulators.append(accumulator)"))
+        XCTAssertLessThan(removeTap.lowerBound, seal.lowerBound)
+        XCTAssertLessThan(seal.lowerBound, stop.lowerBound)
+        XCTAssertTrue(source.contains("ownedSpool.drain(queue: queue, writer: writer)"))
         XCTAssertTrue(source.contains("func cancelCapture(for sessionID: DictationSessionID) async"))
     }
 
@@ -250,7 +251,8 @@ final class RealtimeCaptureBufferTests: XCTestCase {
         )
         let startBody = String(source[start.lowerBound..<finish.lowerBound])
 
-        XCTAssertTrue(startBody.contains("try activateEngine(for: sessionID)"))
+        XCTAssertTrue(startBody.contains("try await activateEngine("))
+        XCTAssertTrue(startBody.contains("generation: generation"))
         XCTAssertFalse(startBody.contains("await selectedInputUID()"))
         XCTAssertFalse(source.contains("selectedInputUID"))
         XCTAssertFalse(source.contains("AudioUnitSetProperty"))
@@ -281,25 +283,25 @@ final class RealtimeCaptureBufferTests: XCTestCase {
         )
         let recoverBody = String(source[recoverStart.lowerBound..<activateStart.lowerBound])
 
-        XCTAssertTrue(source.contains("await self?.recoverFromConfigurationChange(for: sessionID)"))
-        XCTAssertTrue(recoverBody.contains("preserveCurrentAccumulator()"))
-        XCTAssertTrue(recoverBody.contains("stopEngine()"))
+        XCTAssertTrue(source.contains("await self?.recoverFromConfigurationChange("))
+        XCTAssertTrue(source.contains("generation: generation"))
+        XCTAssertTrue(recoverBody.contains("await stopCurrentSegment()"))
         XCTAssertTrue(recoverBody.contains("removeConfigurationObserver()"))
-        XCTAssertTrue(recoverBody.contains("try activateEngine(for: sessionID)"))
+        XCTAssertTrue(recoverBody.contains("try await activateEngine("))
+        XCTAssertTrue(recoverBody.contains("generation: generation"))
         XCTAssertTrue(recoverBody.contains("terminalError = error"))
-        XCTAssertTrue(recoverBody.contains("terminalError = .inputUnavailable"))
+        XCTAssertTrue(recoverBody.contains("terminalError = mapSpoolError(error)"))
         XCTAssertFalse(recoverBody.contains("usableCapturedChunksExist()"))
     }
 
-    func testReconnectsPreserveTotalDurationCapAndStreamingOffset() throws {
+    func testReconnectsPreserveSpoolFramesAndStreamingOffset() throws {
         let source = try captureSource()
 
-        XCTAssertTrue(source.contains("let remainingDuration = remainingCaptureDurationSeconds()"))
-        XCTAssertTrue(source.contains("maximumDurationSeconds: remainingDuration"))
-        XCTAssertTrue(source.contains("Self.maximumCaptureDurationSeconds - completedCaptureDurationSeconds()"))
-        XCTAssertTrue(source.contains("let completedFrameOffset = completedCapturedFrameCount()"))
-        XCTAssertTrue(source.contains("let localFrameOffset = max(0, frameOffset - completedFrameOffset)"))
-        XCTAssertTrue(source.contains("nextFrameOffset: completedFrameOffset + snapshot.nextFrameOffset"))
+        XCTAssertTrue(source.contains("AudioCaptureSpool"))
+        XCTAssertTrue(source.contains("try spool.startSegment(sampleRate: inputFormat.sampleRate)"))
+        XCTAssertTrue(source.contains("afterFrameOffset: frameOffset"))
+        XCTAssertTrue(source.contains("nextFrameOffset: batch.nextFrameOffset"))
+        XCTAssertFalse(source.contains("remainingCaptureDurationSeconds"))
     }
 
     func testFinishDoesNotHideReconnectFailureBehindUsableAudio() throws {
@@ -313,10 +315,9 @@ final class RealtimeCaptureBufferTests: XCTestCase {
         )
         let finishBody = String(source[finishStart.lowerBound..<incrementalStart.lowerBound])
 
-        XCTAssertTrue(finishBody.contains("let snapshot = aggregateSnapshot()"))
-        XCTAssertTrue(source.contains("let chunks = snapshots.flatMap(\\.chunks)"))
-        XCTAssertTrue(source.contains("chunks.isEmpty && failures.contains(.formatChanged)"))
-        XCTAssertFalse(source.contains("usableCapturedChunksExist()"))
+        XCTAssertTrue(finishBody.contains("await stopCurrentSegment()"))
+        XCTAssertTrue(finishBody.contains("sessionSpool.readAllChunks()"))
+        XCTAssertFalse(source.contains("aggregateSnapshot()"))
     }
 
     func testFinalizationPreservesUsablePrefixAtMaximumDuration() {

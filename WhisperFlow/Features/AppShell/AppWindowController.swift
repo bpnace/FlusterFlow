@@ -139,6 +139,7 @@ final class AppWindowController: NSWindowController {
         navigation: AppNavigationModel = AppNavigationModel(),
         overview: AnyView,
         recordingHistoryViewModel: RecordingHistoryViewModel,
+        recoveryView: AnyView = AnyView(EmptyView()),
         settingsView: @escaping (AppDestination) -> AnyView
     ) {
         self.navigation = navigation
@@ -147,7 +148,12 @@ final class AppWindowController: NSWindowController {
         let rootView = AppShellView(
             navigation: navigation,
             overview: overview,
-            recordings: AnyView(RecordingHistoryView(model: recordingHistoryViewModel)),
+            recordings: AnyView(
+                VStack(spacing: 0) {
+                    recoveryView
+                    RecordingHistoryView(model: recordingHistoryViewModel)
+                }
+            ),
             settingsView: settingsView
         )
         let window = NSWindow(

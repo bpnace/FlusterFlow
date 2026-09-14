@@ -194,11 +194,11 @@ final class ProcessingDeadlineAdversarialTests: XCTestCase, @unchecked Sendable 
         await router.releaseExclusiveAccess(for: recoveredSessionID)
     }
 
-    func testBlockedLifecycleDoesNotDelayStopUntilProductASRDeadline() async {
+    func testBlockedLifecycleUsesRecognitionDeadlineInsteadOfReportingBusy() async {
         let backend = CancellationIgnoringLifecycleRecognizer()
         let router = SessionModelSpeechRecognizer(
             recognizers: [.whisperKitLargeV3Turbo: backend],
-            productASRDeadline: .seconds(30),
+            productASRDeadline: .milliseconds(80),
             productASRCancellationGrace: .milliseconds(20)
         )
         let history = DeadlineRecordingHistorySpy()
@@ -227,13 +227,98 @@ final class ProcessingDeadlineAdversarialTests: XCTestCase, @unchecked Sendable 
 
         XCTAssertEqual(
             outcome,
-            .failed(sessionID, DictationFailure(stage: .recognition))
+            .failed(sessionID, DictationFailure(stage: .recognition, reason: .recognitionTimedOut))
         )
         XCTAssertLessThan(elapsed, .seconds(2))
         XCTAssertEqual(events, ["begin", "audio", "failed"])
         XCTAssertEqual(transcriptionCount, 0)
 
         await backend.releaseBlockedOperations()
+    }
+
+    func testEarlyReleaseWaitsForPreparationAndNextSessionCanAcquire() async throws {
+        let backend = CancellationIgnoringLifecycleRecognizer()
+        let router = SessionModelSpeechRecognizer(
+            recognizers: [.whisperKitLargeV3Turbo: backend],
+            productASRDeadline: .seconds(2),
+            productASRCancellationGrace: .milliseconds(20)
+        )
+        let session = DictationSessionID(rawValue: 90_020)
+        let hints = RecognitionHints(language: .german, terms: [])
+        await router.register(.whisperKitLargeV3Turbo, for: session)
+        let startup = Task { try await router.startRecognitionSession(hints: hints, sessionID: session) }
+        await backend.waitUntilLifecycleStarts()
+        await router.stopRecognitionSession(sessionID: session)
+        let final = Task {
+            try await router.finalizeRecognitionSession(
+                AudioInput(buffer: AudioBufferHandle(rawValue: 90_020)),
+                hints: hints, sessionID: session
+            )
+        }
+        try await Task.sleep(for: .milliseconds(60))
+        let beforeRelease = await backend.transcriptionCount()
+        XCTAssertEqual(beforeRelease, 0)
+        await backend.releaseBlockedOperations()
+        try await startup.value
+        let transcript = try await final.value
+        XCTAssertFalse(transcript.text.isEmpty)
+        await router.cancel(sessionID: session)
+        try await router.acquireExclusiveAccess(
+            for: DictationSessionID(rawValue: 90_021), purpose: .liveDictation
+        )
+    }
+
+    func testStopBeforeStartupRejectsLateLifecycleButAllowsFinalDecode() async throws {
+        let backend = CancellationIgnoringLifecycleRecognizer()
+        let router = SessionModelSpeechRecognizer(recognizers: [.whisperKitLargeV3Turbo: backend])
+        let session = DictationSessionID(rawValue: 90_022)
+        let hints = RecognitionHints(language: .german, terms: [])
+        await router.register(.whisperKitLargeV3Turbo, for: session)
+        await backend.releaseBlockedOperations()
+        await router.stopRecognitionSession(sessionID: session)
+        do {
+            try await router.startRecognitionSession(hints: hints, sessionID: session)
+            XCTFail("A stopped session must not start a late lifecycle operation")
+        } catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+        let transcript = try await router.transcribe(
+            AudioInput(buffer: AudioBufferHandle(rawValue: 90_022)), hints: hints, sessionID: session
+        )
+        XCTAssertFalse(transcript.text.isEmpty)
+        await router.cancel(sessionID: session)
+    }
+
+    func testExplicitCancelAfterEarlyStopReturnsBeforePreparationDrains() async throws {
+        let backend = CancellationIgnoringLifecycleRecognizer()
+        let router = SessionModelSpeechRecognizer(
+            recognizers: [.whisperKitLargeV3Turbo: backend],
+            productASRCancellationGrace: .milliseconds(20)
+        )
+        let session = DictationSessionID(rawValue: 90_023)
+        let next = DictationSessionID(rawValue: 90_024)
+        await router.register(.whisperKitLargeV3Turbo, for: session)
+        let startup = Task {
+            try await router.startRecognitionSession(
+                hints: RecognitionHints(language: .german, terms: []), sessionID: session
+            )
+        }
+        await backend.waitUntilLifecycleStarts()
+        await router.stopRecognitionSession(sessionID: session)
+        let returned = expectation(description: "cancel remains bounded during preparation")
+        Task { await router.cancel(sessionID: session); returned.fulfill() }
+        let result = await XCTWaiter.fulfillment(of: [returned], timeout: 0.5)
+        XCTAssertEqual(result, .completed)
+        do {
+            try await router.acquireExclusiveAccess(for: next, purpose: .liveDictation)
+            XCTFail("Cancelled preparation still owns the backend until it drains")
+        } catch {
+            XCTAssertEqual(error as? SessionModelSpeechRecognizerError,
+                           .recognizerBusy(activePurpose: .liveDictation))
+        }
+        await backend.releaseBlockedOperations()
+        _ = try? await startup.value
+        try await acquireAfterQuarantineClears(router, sessionID: next)
+        let decodeCount = await backend.transcriptionCount()
+        XCTAssertEqual(decodeCount, 0)
     }
 
     private func acquireAfterQuarantineClears(
@@ -260,6 +345,7 @@ private actor CancellationIgnoringLifecycleRecognizer:
     SpeechRecognizing,
     SpeechRecognitionLifecycle {
     private var lifecycleStarted = false
+    private var isReleased = false
     private var lifecycleStartContinuations: [CheckedContinuation<Void, Never>] = []
     private var blockedContinuations: [UnsafeContinuation<Void, Never>] = []
     private var transcriptions = 0
@@ -319,6 +405,7 @@ private actor CancellationIgnoringLifecycleRecognizer:
     }
 
     func releaseBlockedOperations() {
+        isReleased = true
         blockedContinuations.forEach { $0.resume() }
         blockedContinuations.removeAll()
     }
@@ -326,6 +413,7 @@ private actor CancellationIgnoringLifecycleRecognizer:
     func transcriptionCount() -> Int { transcriptions }
 
     private func blockIgnoringCancellation() async {
+        guard !isReleased else { return }
         await withUnsafeContinuation { continuation in
             blockedContinuations.append(continuation)
         }

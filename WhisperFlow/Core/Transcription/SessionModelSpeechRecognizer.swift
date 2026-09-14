@@ -10,6 +10,15 @@ enum ProductASRDeadlineError: Error, Equatable, Sendable {
     case exceeded
 }
 
+// Allow model loading and slower local hardware, then scale with recording length.
+// Explicit deadlines remain available for callers and deterministic timeout tests.
+enum RecognitionDeadlinePolicy {
+    static func budget(audioDuration: Double?) -> Duration {
+        let duration = audioDuration.flatMap { $0.isFinite ? max(0, $0) : nil } ?? 0
+        return .seconds(min(900, 300 + 2 * duration))
+    }
+}
+
 enum ProductASRDeadlineContext {
     @TaskLocal static var deadline: ContinuousClock.Instant?
 
@@ -57,18 +66,20 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
     }
 
     private let recognizers: [LocalModelChoice: any SpeechRecognizing]
-    private let productASRDeadline: Duration
+    private let productASRDeadline: Duration?
     private let productASRCancellationGrace: Duration
     private var choices: [DictationSessionID: LocalModelChoice] = [:]
     private var recognitionLease: RecognitionLease?
     private var recognitionOperations: [DictationSessionID: RecognitionOperation] = [:]
     private var lifecycleOperations: [DictationSessionID: LifecycleOperation] = [:]
     private var cancellationOperations: [DictationSessionID: CancellationOperation] = [:]
+    private var stoppingSessions: Set<DictationSessionID> = []
+    private var gracefulStops: [DictationSessionID: Task<Void, Never>] = [:]
     private var quarantinedSessions: Set<DictationSessionID> = []
 
     init(
         recognizers: [LocalModelChoice: any SpeechRecognizing],
-        productASRDeadline: Duration = .seconds(30),
+        productASRDeadline: Duration? = nil,
         productASRCancellationGrace: Duration = .seconds(1)
     ) {
         self.recognizers = recognizers
@@ -112,11 +123,13 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         }
         return try await runRecognitionOperation(
             sessionID: sessionID,
+            audioDuration: audio.timing?.processedDurationSeconds,
             cancelUnderlyingRecognition: {
                 await recognizer.cancel(sessionID: sessionID)
             },
             operation: {
-                try await recognizer.transcribe(
+                try await self.awaitGracefulStop(sessionID: sessionID)
+                return try await recognizer.transcribe(
                     audio,
                     hints: hints,
                     sessionID: sessionID
@@ -144,6 +157,7 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         }
         let recognition = recognitionOperations[sessionID]
         let lifecycle = lifecycleOperations[sessionID]
+        let gracefulStop = gracefulStops[sessionID]
         if recognitionLease == nil {
             recognitionLease = RecognitionLease(
                 sessionID: sessionID,
@@ -157,11 +171,13 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
             task: Task { [weak self] in
                 recognition?.task.cancel()
                 lifecycle?.cancel()
+                gracefulStop?.cancel()
                 await recognizer.cancel(sessionID: sessionID)
                 if let recognition {
                     _ = await recognition.task.result
                 }
                 await lifecycle?.waitForCompletion()
+                await gracefulStop?.value
                 await self?.finishCancellation(id: operationID, sessionID: sessionID)
                 await completion.complete()
             },
@@ -181,6 +197,7 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         hints: RecognitionHints,
         sessionID: DictationSessionID
     ) async throws {
+        guard !stoppingSessions.contains(sessionID) else { throw CancellationError() }
         let acquiredLease = try claimExclusiveAccess(
             for: sessionID,
             purpose: .liveDictation
@@ -205,6 +222,7 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         hints: RecognitionHints,
         sessionID: DictationSessionID
     ) async throws {
+        guard !stoppingSessions.contains(sessionID) else { throw CancellationError() }
         let acquiredLease = try claimExclusiveAccess(
             for: sessionID,
             purpose: .liveDictation
@@ -229,6 +247,7 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         with chunk: RecognitionAudioChunk,
         sessionID: DictationSessionID
     ) async throws -> RecognitionChunkDisposition {
+        guard !stoppingSessions.contains(sessionID) else { throw CancellationError() }
         let acquiredLease = try claimExclusiveAccess(
             for: sessionID,
             purpose: .liveDictation
@@ -251,43 +270,28 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
     }
 
     func stopRecognitionSession(sessionID: DictationSessionID) async {
-        if let existing = cancellationOperations[sessionID] {
-            if await waitForCancellation(
-                existing,
-                grace: productASRCancellationGrace
-            ) {
-                finishCancellation(existing, sessionID: sessionID)
-            }
-            return
-        }
-        guard let recognizer = try? recognizer(for: sessionID),
-              let lifecycle = recognizer as? any SpeechRecognitionLifecycle else {
-            return
-        }
+        // Normal key release is not cancellation. Publish the stop before any
+        // suspension so a late startup/update cannot reopen this session.
+        stoppingSessions.insert(sessionID)
+        guard gracefulStops[sessionID] == nil,
+              cancellationOperations[sessionID] == nil,
+              let recognizer = try? recognizer(for: sessionID),
+              let lifecycle = recognizer as? any SpeechRecognitionLifecycle else { return }
         let activeLifecycle = lifecycleOperations[sessionID]
-        let cancellationID = UUID()
-        let completion = QuiescenceCompletion()
-        let cancellation = CancellationOperation(
-            id: cancellationID,
-            task: Task { [weak self] in
-                activeLifecycle?.cancel()
-                await lifecycle.stopRecognitionSession(sessionID: sessionID)
-                await activeLifecycle?.waitForCompletion()
-                await self?.finishCancellation(id: cancellationID, sessionID: sessionID)
-                await completion.complete()
-            },
-            completion: completion
-        )
-        cancellationOperations[sessionID] = cancellation
-        quarantinedSessions.insert(sessionID)
-        if await waitForCancellation(
-            cancellation,
-            grace: productASRCancellationGrace
-        ) {
-            finishCancellation(cancellation, sessionID: sessionID)
-        } else {
-            choices[sessionID] = nil
+        gracefulStops[sessionID] = Task {
+            await activeLifecycle?.waitForCompletion()
+            guard !Task.isCancelled else { return }
+            await lifecycle.stopRecognitionSession(sessionID: sessionID)
         }
+    }
+
+    private func awaitGracefulStop(sessionID: DictationSessionID) async throws {
+        if let stop = gracefulStops[sessionID] {
+            await stop.value
+        } else if let lifecycle = lifecycleOperations[sessionID] {
+            await lifecycle.waitForCompletion()
+        }
+        try Task.checkCancellation()
     }
 
     func finalizeRecognitionSession(
@@ -305,10 +309,12 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         let recognizer = try recognizer(for: sessionID)
         return try await runRecognitionOperation(
             sessionID: sessionID,
+            audioDuration: audio.timing?.processedDurationSeconds,
             cancelUnderlyingRecognition: {
                 await recognizer.cancel(sessionID: sessionID)
             },
             operation: {
+                try await self.awaitGracefulStop(sessionID: sessionID)
                 if let lifecycle = recognizer as? any SpeechRecognitionLifecycle {
                     return try await lifecycle.finalizeRecognitionSession(
                         audio,
@@ -362,6 +368,7 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         sessionID: DictationSessionID,
         operation: @escaping @Sendable () async throws -> Value
     ) async throws -> Value {
+        guard !stoppingSessions.contains(sessionID) else { throw CancellationError() }
         if let lease = recognitionLease,
            lifecycleOperations[sessionID] != nil {
             throw SessionModelSpeechRecognizerError.recognizerBusy(
@@ -381,6 +388,7 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
 
     private func runRecognitionOperation(
         sessionID: DictationSessionID,
+        audioDuration: Double?,
         cancelUnderlyingRecognition: @escaping @Sendable () async -> Void,
         operation: @escaping @Sendable () async throws -> RawTranscript
     ) async throws -> RawTranscript {
@@ -392,6 +400,7 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         }
         let clock = ContinuousClock()
         let deadlineDuration = productASRDeadline
+            ?? RecognitionDeadlinePolicy.budget(audioDuration: audioDuration)
         let cancellationGrace = productASRCancellationGrace
         let deadline = clock.now.advanced(by: deadlineDuration)
         return try await ProductASRDeadlineContext.$deadline.withValue(deadline) {
@@ -469,6 +478,8 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         guard cancellationOperations[sessionID]?.id == id else { return }
         cancellationOperations[sessionID] = nil
         quarantinedSessions.remove(sessionID)
+        gracefulStops[sessionID] = nil
+        stoppingSessions.remove(sessionID)
         releaseExclusiveAccess(for: sessionID)
     }
 
@@ -487,14 +498,20 @@ actor SessionModelSpeechRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         if let existing = cancellationOperations[sessionID] {
             return existing
         }
+        let lifecycle = lifecycleOperations[sessionID]
+        let gracefulStop = gracefulStops[sessionID]
         let cancellationID = UUID()
         let completion = QuiescenceCompletion()
         let cancellation = CancellationOperation(
             id: cancellationID,
             task: Task { [weak self] in
                 recognition.task.cancel()
+                lifecycle?.cancel()
+                gracefulStop?.cancel()
                 await cancelUnderlyingRecognition()
                 _ = await recognition.task.result
+                await lifecycle?.waitForCompletion()
+                await gracefulStop?.value
                 await self?.finishCancellation(id: cancellationID, sessionID: sessionID)
                 await completion.complete()
             },

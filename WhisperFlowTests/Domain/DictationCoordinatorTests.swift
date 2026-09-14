@@ -144,7 +144,47 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         _ = await coordinator.stop(sessionID: sessionID)
         let events = await history.events()
 
-        XCTAssertEqual(events, ["begin:german", "audio", "transcript:hello"])
+        XCTAssertEqual(
+            events,
+            ["begin:german", "audio", "raw:hello", "final:hello", "complete"]
+        )
+    }
+
+    func testCorrectedCandidatePersistsFinalTextAfterRawTranscript() async {
+        let history = RecordingHistorySpy()
+        let coordinator = makeCoordinator(
+            cleanup: CorrectingCleanup(text: "corrected"),
+            recordingHistory: history
+        )
+        let sessionID = startedSessionID(await coordinator.start(language: .german))
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+        let events = await history.events()
+
+        XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect))
+        XCTAssertEqual(
+            events,
+            ["begin:german", "audio", "raw:hello", "final:corrected", "complete"]
+        )
+    }
+
+    func testInsertionFailureRetainsFinalTextBeforeMarkingHistoryFailed() async {
+        let history = RecordingHistorySpy()
+        let coordinator = makeCoordinator(
+            cleanup: CorrectingCleanup(text: "corrected"),
+            insertion: FailingInsertion(),
+            recordingHistory: history
+        )
+        let sessionID = startedSessionID(await coordinator.start(language: .german))
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+        let events = await history.events()
+
+        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .insertion)))
+        XCTAssertEqual(
+            events,
+            ["begin:german", "audio", "raw:hello", "final:corrected", "failed"]
+        )
     }
 
     func testRecognitionFailureKeepsPersistedAudioMarkedFailed() async {
@@ -188,12 +228,17 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
 
         XCTAssertEqual(
             outcome,
-            .failed(sessionID, DictationFailure(stage: .recognition))
+            .failed(
+                sessionID,
+                DictationFailure(stage: .recognition, reason: .recognitionTimedOut)
+            )
         )
         XCTAssertEqual(
             snapshot,
             DictationSnapshot(
-                phase: .error(DictationFailure(stage: .recognition)),
+                phase: .error(
+                    DictationFailure(stage: .recognition, reason: .recognitionTimedOut)
+                ),
                 activeSessionID: nil
             )
         )
@@ -226,85 +271,114 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(transcriptionCount, 0)
     }
 
-    func testHistoryBeginFailureStopsCaptureAndSurfacesError() async {
+    func testHistoryBeginFailureDoesNotStopCaptureAndWarnsOnce() async {
         let audio = CountingAudioCapture()
+        let warning = HistoryFailureCounter()
         let coordinator = makeCoordinator(
             audioCapture: audio,
             recordingHistory: FailingRecordingHistory(stage: .begin)
         )
+        await coordinator.setRecordingHistoryFailureHandler { sessionID in
+            await warning.record(sessionID)
+        }
 
         let outcome = await coordinator.start()
+        let sessionID = outcome.sessionID
 
-        XCTAssertEqual(
-            outcome,
-            .failed(DictationSessionID(rawValue: 1), DictationFailure(stage: .audioStart))
-        )
+        XCTAssertEqual(outcome, .started(sessionID))
         let cancellationCount = await audio.cancelCount()
-        XCTAssertEqual(cancellationCount, 1)
+        let warningCount = await warning.count()
+        XCTAssertEqual(cancellationCount, 0)
+        XCTAssertEqual(warningCount, 1)
+        _ = await coordinator.cancel(sessionID: sessionID)
     }
 
-    func testAudioPersistenceFailurePreventsRecognition() async {
+    func testAudioPersistenceFailureContinuesRecognitionAndWarnsOnce() async {
         let recognizer = CountingBorrowingRecognizer()
+        let warning = HistoryFailureCounter()
         let coordinator = makeCoordinator(
             recognizer: recognizer,
             recordingHistory: FailingRecordingHistory(stage: .audio)
         )
+        await coordinator.setRecordingHistoryFailureHandler { sessionID in
+            await warning.record(sessionID)
+        }
         let sessionID = startedSessionID(await coordinator.start())
 
         let outcome = await coordinator.stop(sessionID: sessionID)
 
-        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .audioFinalize)))
+        XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect))
         let transcriptionCount = await recognizer.transcriptionCount()
-        XCTAssertEqual(transcriptionCount, 0)
+        let warningCount = await warning.count()
+        XCTAssertEqual(transcriptionCount, 1)
+        XCTAssertEqual(warningCount, 1)
     }
 
-    func testTranscriptPersistenceFailurePreventsInsertion() async {
+    func testTranscriptPersistenceFailureContinuesInsertionAndWarnsOnce() async {
         let insertion = RecordingInsertion()
+        let warning = HistoryFailureCounter()
         let coordinator = makeCoordinator(
             insertion: insertion,
             recordingHistory: FailingRecordingHistory(stage: .transcript)
         )
+        await coordinator.setRecordingHistoryFailureHandler { sessionID in
+            await warning.record(sessionID)
+        }
         let sessionID = startedSessionID(await coordinator.start())
 
         let outcome = await coordinator.stop(sessionID: sessionID)
 
-        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .recognition)))
+        XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect))
         let insertionCount = await insertion.count()
-        XCTAssertEqual(insertionCount, 0)
+        let warningCount = await warning.count()
+        XCTAssertEqual(insertionCount, 1)
+        XCTAssertEqual(warningCount, 1)
     }
 
-    func testFailureStatePersistenceFailureSurfacesAudioFinalizeFailure() async {
+    func testFailureStatePersistenceFailureDoesNotReplacePrimaryFailure() async {
+        let warning = HistoryFailureCounter()
         let coordinator = makeCoordinator(
             recognizer: FailingRecognizer(),
             recordingHistory: FailingRecordingHistory(stage: .markFailed)
         )
+        await coordinator.setRecordingHistoryFailureHandler { sessionID in
+            await warning.record(sessionID)
+        }
         let sessionID = startedSessionID(await coordinator.start())
 
         let outcome = await coordinator.stop(sessionID: sessionID)
+        let warningCount = await warning.count()
 
-        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .audioFinalize)))
+        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .recognition)))
+        XCTAssertEqual(warningCount, 1)
     }
 
-    func testCancellationPersistenceFailureSurfacesErrorState() async {
+    func testCancellationPersistenceFailureRemainsCancellation() async {
+        let warning = HistoryFailureCounter()
         let coordinator = makeCoordinator(
             recordingHistory: FailingRecordingHistory(stage: .interrupt)
         )
+        await coordinator.setRecordingHistoryFailureHandler { sessionID in
+            await warning.record(sessionID)
+        }
         let sessionID = startedSessionID(await coordinator.start())
 
         let outcome = await coordinator.cancel(sessionID: sessionID)
         let snapshot = await coordinator.snapshot()
+        let warningCount = await warning.count()
 
         XCTAssertEqual(
             outcome,
-            .failed(sessionID, DictationFailure(stage: .audioFinalize))
+            .cancelled(sessionID)
         )
         XCTAssertEqual(
             snapshot,
             DictationSnapshot(
-                phase: .error(DictationFailure(stage: .audioFinalize)),
+                phase: .cancelled,
                 activeSessionID: nil
             )
         )
+        XCTAssertEqual(warningCount, 1)
     }
 
     func testTerminalHistoryWritesRetryBeforeSessionResourcesAreReleased() async {
@@ -312,7 +386,10 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
             terminal: .failed,
             failuresBeforeSuccess: 2
         )
-        let failedCoordinator = makeCoordinator(recordingHistory: failedHistory)
+        let failedCoordinator = makeCoordinator(
+            recognizer: FailingRecognizer(),
+            recordingHistory: failedHistory
+        )
         let failedSessionID = startedSessionID(await failedCoordinator.start())
 
         let failedOutcome = await failedCoordinator.stop(sessionID: failedSessionID)
@@ -320,7 +397,7 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
 
         XCTAssertEqual(
             failedOutcome,
-            .failed(failedSessionID, DictationFailure(stage: .audioFinalize))
+            .failed(failedSessionID, DictationFailure(stage: .recognition))
         )
         XCTAssertEqual(failedAttempts, 3)
 
@@ -336,6 +413,29 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
 
         XCTAssertEqual(interruptedOutcome, .cancelled(interruptedSessionID))
         XCTAssertEqual(interruptedAttempts, 3)
+    }
+
+    func testPersistentTerminalHistoryFailureWarnsOnceAndReleasesTracking() async {
+        let warning = HistoryFailureCounter()
+        let history = PersistentTerminalWriteRecordingHistory()
+        let coordinator = makeCoordinator(
+            recognizer: FailingRecognizer(),
+            recordingHistory: history
+        )
+        await coordinator.setRecordingHistoryFailureHandler { sessionID in
+            await warning.record(sessionID)
+        }
+        let sessionID = startedSessionID(await coordinator.start())
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+        let terminalAttempts = await history.terminalAttempts()
+        let releaseAttempts = await history.releaseAttempts()
+        let warningCount = await warning.count()
+
+        XCTAssertEqual(outcome, .failed(sessionID, DictationFailure(stage: .recognition)))
+        XCTAssertEqual(terminalAttempts, 3)
+        XCTAssertEqual(releaseAttempts, 1)
+        XCTAssertEqual(warningCount, 1)
     }
 
     func testIncrementalRecognitionStopsBeforeCanonicalFinalDecode() async {
@@ -943,6 +1043,42 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(audioCancelCount, 1)
     }
 
+    func testCancelDuringBlockedSuccessfulHistoryBeginDoesNotResurrectSession() async {
+        let beginStarted = AsyncGate()
+        let releaseBegin = AsyncGate()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = RecordingHistoryStore(rootURL: root)
+        let recorder = RecordingHistoryRecorder(
+            store: store,
+            sampleAccess: AudioBufferStore()
+        )
+        let history = GatedBeginRecordingHistory(
+            recorder: recorder,
+            beginStarted: beginStarted,
+            releaseBegin: releaseBegin
+        )
+        let coordinator = makeCoordinator(recordingHistory: history)
+
+        let startTask = Task { await coordinator.start(language: .german) }
+        await beginStarted.wait()
+        let primingSnapshot = await coordinator.snapshot()
+        let sessionID = try! XCTUnwrap(primingSnapshot.activeSessionID)
+
+        let cancelOutcome = await coordinator.cancel(sessionID: sessionID)
+        await releaseBegin.open()
+        let startOutcome = await startTask.value
+        let finalSnapshot = await coordinator.snapshot()
+
+        XCTAssertEqual(cancelOutcome, .cancelled(sessionID))
+        XCTAssertEqual(startOutcome, .ignoredStale(sessionID))
+        XCTAssertEqual(finalSnapshot.activeSessionID, nil)
+        let hasActiveMapping = await history.hasActiveMapping()
+        XCTAssertFalse(hasActiveMapping)
+        let entries = try! await store.list()
+        XCTAssertTrue(entries.isEmpty)
+    }
+
     func testCancelDuringListeningReleasesAudioCapture() async {
         let audio = CountingAudioCapture()
         let coordinator = makeCoordinator(audioCapture: audio)
@@ -1334,7 +1470,15 @@ private actor RecordingHistorySpy: RecordingHistoryRecording {
     }
 
     func persistTranscript(_ transcript: RawTranscript, sessionID: DictationSessionID) {
-        recordedEvents.append("transcript:\(transcript.text)")
+        recordedEvents.append("raw:\(transcript.text)")
+    }
+
+    func persistFinalTranscript(_ text: String, sessionID: DictationSessionID) {
+        recordedEvents.append("final:\(text)")
+    }
+
+    func complete(sessionID: DictationSessionID) {
+        recordedEvents.append("complete")
     }
 
     func markFailed(sessionID: DictationSessionID) throws {
@@ -1346,6 +1490,47 @@ private actor RecordingHistorySpy: RecordingHistoryRecording {
     }
 
     func events() -> [String] { recordedEvents }
+}
+
+private actor HistoryFailureCounter {
+    private var sessionIDs: [DictationSessionID] = []
+
+    func record(_ sessionID: DictationSessionID) {
+        sessionIDs.append(sessionID)
+    }
+
+    func count() -> Int {
+        sessionIDs.count
+    }
+}
+
+private struct CorrectingCleanup: TextCleaning {
+    let text: String
+
+    func clean(
+        _ transcript: RawTranscript,
+        context: ContextSnapshot,
+        sessionID: DictationSessionID
+    ) async throws -> LocalCandidate {
+        LocalCandidate(text: text)
+    }
+}
+
+private struct FailingInsertion: TextInserting {
+    func insert(
+        _ candidate: FinalCandidate,
+        sessionID: DictationSessionID
+    ) async throws -> InsertionOutcome {
+        throw TestFailure.expected
+    }
+
+    func requestCancellation(
+        sessionID: DictationSessionID
+    ) async -> InsertionCancellationDisposition {
+        .cancelledBeforeCommit
+    }
+
+    func releaseInsertionSession(sessionID: DictationSessionID) async {}
 }
 
 private actor GatedCheckpointRecordingHistory: RecordingHistoryRecording {
@@ -1382,6 +1567,71 @@ private actor GatedCheckpointRecordingHistory: RecordingHistoryRecording {
 
     func events() -> [String] {
         recordedEvents
+    }
+}
+
+private actor GatedBeginRecordingHistory: RecordingHistoryRecording {
+    private let recorder: RecordingHistoryRecorder
+    private let beginStarted: AsyncGate
+    private let releaseBegin: AsyncGate
+    private var sessionID: DictationSessionID?
+
+    init(
+        recorder: RecordingHistoryRecorder,
+        beginStarted: AsyncGate,
+        releaseBegin: AsyncGate
+    ) {
+        self.recorder = recorder
+        self.beginStarted = beginStarted
+        self.releaseBegin = releaseBegin
+    }
+
+    func begin(sessionID: DictationSessionID, language: DictationLanguage) async throws {
+        await beginStarted.open()
+        await releaseBegin.wait()
+        try await recorder.begin(sessionID: sessionID, language: language)
+        self.sessionID = sessionID
+    }
+
+    func persistCheckpoint(
+        _ chunk: RecognitionAudioChunk,
+        sessionID: DictationSessionID
+    ) async throws {
+        try await recorder.persistCheckpoint(chunk, sessionID: sessionID)
+    }
+
+    func persistAudio(_ input: AudioInput, sessionID: DictationSessionID) async throws {
+        try await recorder.persistAudio(input, sessionID: sessionID)
+    }
+
+    func persistTranscript(_ transcript: RawTranscript, sessionID: DictationSessionID) async throws {
+        try await recorder.persistTranscript(transcript, sessionID: sessionID)
+    }
+
+    func persistFinalTranscript(_ text: String, sessionID: DictationSessionID) async throws {
+        try await recorder.persistFinalTranscript(text, sessionID: sessionID)
+    }
+
+    func complete(sessionID: DictationSessionID) async throws {
+        try await recorder.complete(sessionID: sessionID)
+    }
+
+    func markFailed(sessionID: DictationSessionID) async throws {
+        try await recorder.markFailed(sessionID: sessionID)
+    }
+
+    func interrupt(sessionID: DictationSessionID) async throws {
+        try await recorder.interrupt(sessionID: sessionID)
+    }
+
+    func hasActiveMapping() async -> Bool {
+        guard let sessionID else { return false }
+        do {
+            try await recorder.persistFinalTranscript("probe", sessionID: sessionID)
+            return true
+        } catch {
+            return false
+        }
     }
 }
 
@@ -1466,6 +1716,40 @@ private actor TransientTerminalWriteRecordingHistory: RecordingHistoryRecording 
     func terminalAttemptCount() -> Int {
         terminalAttempts
     }
+}
+
+private actor PersistentTerminalWriteRecordingHistory: RecordingHistoryRecording {
+    private var attempts = 0
+    private var releases = 0
+
+    func begin(sessionID: DictationSessionID, language: DictationLanguage) {}
+
+    func persistCheckpoint(
+        _ chunk: RecognitionAudioChunk,
+        sessionID: DictationSessionID
+    ) {}
+
+    func persistAudio(_ input: AudioInput, sessionID: DictationSessionID) {}
+
+    func persistTranscript(_ transcript: RawTranscript, sessionID: DictationSessionID) {}
+
+    func markFailed(sessionID: DictationSessionID) throws {
+        attempts += 1
+        throw TestFailure.expected
+    }
+
+    func interrupt(sessionID: DictationSessionID) throws {
+        attempts += 1
+        throw TestFailure.expected
+    }
+
+    func releaseTracking(sessionID: DictationSessionID) {
+        releases += 1
+    }
+
+    func terminalAttempts() -> Int { attempts }
+
+    func releaseAttempts() -> Int { releases }
 }
 
 private func startedSessionID(
