@@ -12,13 +12,13 @@ Dieser Patch verbessert den Abschluss von Handsfree-Diktaten, die lokale Verarbe
 - Adaptiv verlangt bei einer bloßen Häufung von Funktionswörtern zusätzliche Unsicherheit, bevor Large zugeschaltet wird. Starke Wiederholungen und andere Qualitätswarnungen bleiben berücksichtigt. Ein schlechteres Large-Ergebnis oder ein Large-Timeout verdrängen kein verwendbares Turbo-Ergebnis.
 - Ob lokal nachbearbeitet wird, hängt vom ausgewählten Transkript ab. Ein vorheriger Modellwechsel allein löst keine Nachbearbeitung mehr aus.
 - Large bleibt bei normalem Betrieb zehn Minuten statt zwei Minuten im Leerlauf geladen; die bestehende Freigabe bei Speicherdruck bleibt erhalten.
-- Inhaltsfreie Zeitmessungen trennen Modellvorbereitung, Erkennung, adaptive Auswahl, Nachbearbeitung und Einfügung. Opt-in-Benchmarks vergleichen tatsächlich geladene Modelle und Wortfehlerraten.
+- Inhaltsfreie Zeitmessungen trennen Modellvorbereitung, Erkennung, adaptive Auswahl, Nachbearbeitung und Einfügung. Lokale Benchmark-Helfer sind nicht Bestandteil dieses Patches.
 
 ## Verifikation
 
 Vier unmittelbar aufeinanderfolgende Live-Diktate mit demselben 110-Wörter-Testtext über Lautsprecher und Mikrofon in TextEdit: jeweils 110 Wörter, keine Wortfehler, bestätigte Einfügung. Gesamtdauer nach Aufnahmeende: 3,45 / 3,10 / 3,04 / 3,09 Sekunden. Adaptiv wählte jeweils Turbo; zusätzliche Nachbearbeitung wurde übersprungen. Der getestete Funktionsstand wurde anschließend nur für diesen Patch versioniert.
 
-Die vollständige Testsuite bestand mit 497 Tests, 17 expliziten Opt-in-Skips und keinen Fehlern. Der lokale Privacy-Harness einschließlich Negativkontrollen bestand ebenfalls.
+Die vollständige Testsuite bestand mit 491 Tests, 14 expliziten Opt-in-Skips und keinen Fehlern. Der lokale Privacy-Harness einschließlich Negativkontrollen bestand ebenfalls.
 
 ## Bekannte Grenzen
 

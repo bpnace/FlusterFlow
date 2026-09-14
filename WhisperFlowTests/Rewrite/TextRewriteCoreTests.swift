@@ -732,42 +732,6 @@ final class TextRewriteCoreTests: XCTestCase {
         XCTAssertFalse(output.contains("```"), diagnostic)
     }
 
-    func testInstalledRewriteLatencyWhenExplicitlyRequested() async throws {
-        let environment = ProcessInfo.processInfo.environment
-        guard let sourcePath = environment["FLUSTERFLOW_REWRITE_BENCHMARK_TEXT"],
-              let reportPath = environment["FLUSTERFLOW_REWRITE_BENCHMARK_REPORT"] else {
-            throw XCTSkip("Opt-in installed local rewrite latency benchmark")
-        }
-        let source = try String(contentsOfFile: sourcePath, encoding: .utf8)
-        let rewriter = FoundationModelsTextRewriter()
-        let request = makeRequest(text: source)
-        var rows: [[String: Any]] = []
-        for run in 1...3 {
-            if run > 1 {
-                _ = await rewriter.prewarm(TextRewritePrewarmRequest(
-                    sessionID: request.sessionID, language: request.language,
-                    context: request.context, promptPrefix: "Sprache: Deutsch"
-                ))
-            }
-            let start = ProcessInfo.processInfo.systemUptime
-            let result = await rewriter.rewrite(request)
-            rows.append([
-                "run": run, "prewarmRequested": run > 1,
-                "seconds": ProcessInfo.processInfo.systemUptime - start,
-                "outcome": String(describing: result.outcome),
-                "reason": String(describing: result.failureReason),
-                "validationIssues": result.validationIssues.map { String(describing: $0) },
-                "hadAmbiguity": result.hadAmbiguity,
-                "outputMatchesInput": result.outputText == source,
-                "inputWords": source.split(whereSeparator: { $0.isWhitespace }).count,
-                "outputWords": result.outputText.split(whereSeparator: { $0.isWhitespace }).count
-            ])
-            try JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted, .sortedKeys])
-                .write(to: URL(fileURLWithPath: reportPath), options: .atomic)
-            XCTAssertFalse(result.outputText.isEmpty)
-        }
-    }
-
     private func makeRequest(
         text: String,
         protectedTerms: [String] = [],

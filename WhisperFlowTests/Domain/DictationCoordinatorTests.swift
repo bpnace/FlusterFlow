@@ -862,89 +862,38 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
 
     func testAdaptiveFallbackReasonsDoNotForceRewriteForAHealthySelectedTranscript() async {
         let healthyText = "Heute planen wir gemeinsam die Arbeit."
-        let selectedLargeTranscript = RawTranscript(
-            text: healthyText,
-            language: .german,
-            backend: .whisperKitLargeV3,
-            avgLogprob: -0.1,
-            minWordProbability: 0.95,
-            compressionRatio: 1.0,
-            decoderFallback: RecognitionDecoderFallback.none,
-            adaptive: AdaptiveRecognitionMetadata(
-                attemptedBackends: [.whisperKitLargeV3Turbo, .whisperKitLargeV3],
-                selectedBackend: .whisperKitLargeV3,
-                fallbackReasons: [.lowAverageLogprob(-0.95)],
-                largeFallbackAccepted: true
+        for selectedBackend: RecognitionBackend in [.whisperKitLargeV3, .whisperKitLargeV3Turbo] {
+            let acceptedLarge = selectedBackend == .whisperKitLargeV3
+            let transcript = RawTranscript(
+                text: healthyText,
+                language: .german,
+                backend: selectedBackend,
+                avgLogprob: -0.1,
+                minWordProbability: 0.95,
+                compressionRatio: 1.0,
+                decoderFallback: RecognitionDecoderFallback.none,
+                adaptive: AdaptiveRecognitionMetadata(
+                    attemptedBackends: [.whisperKitLargeV3Turbo, .whisperKitLargeV3],
+                    selectedBackend: selectedBackend,
+                    fallbackReasons: acceptedLarge ? [.lowAverageLogprob(-0.95)] : [.largeLowerQuality],
+                    largeFallbackAccepted: acceptedLarge
+                )
             )
-        )
-        let selectedLargeInsertion = RecordingInsertion()
-        let selectedLargeRewriter = RecordingTextRewriter(output: "Nicht verwenden.")
-        let selectedLargeCoordinator = makeCoordinator(
-            recognizer: MetadataRecognizer(transcript: selectedLargeTranscript),
-            localRewriter: selectedLargeRewriter,
-            insertion: selectedLargeInsertion
-        )
-
-        let selectedLargeSessionID = startedSessionID(
-            await selectedLargeCoordinator.start(language: .german)
-        )
-        let selectedLargeOutcome = await selectedLargeCoordinator.stop(
-            sessionID: selectedLargeSessionID
-        )
-        let selectedLargeCandidates = await selectedLargeInsertion.candidates()
-        let selectedLargeRewriteCount = await selectedLargeRewriter.rewriteCount()
-
-        XCTAssertEqual(
-            selectedLargeOutcome,
-            .completed(selectedLargeSessionID, .confirmedDirect)
-        )
-        XCTAssertEqual(
-            selectedLargeCandidates,
-            [.local(LocalCandidate(text: healthyText))]
-        )
-        XCTAssertEqual(selectedLargeRewriteCount, 0)
-
-        let retainedTurboTranscript = RawTranscript(
-            text: healthyText,
-            language: .german,
-            backend: .whisperKitLargeV3Turbo,
-            avgLogprob: -0.1,
-            minWordProbability: 0.95,
-            compressionRatio: 1.0,
-            decoderFallback: RecognitionDecoderFallback.none,
-            adaptive: AdaptiveRecognitionMetadata(
-                attemptedBackends: [.whisperKitLargeV3Turbo, .whisperKitLargeV3],
-                selectedBackend: .whisperKitLargeV3Turbo,
-                fallbackReasons: [.largeLowerQuality],
-                largeFallbackAccepted: false
+            let insertion = RecordingInsertion()
+            let rewriter = RecordingTextRewriter(output: "Nicht verwenden.")
+            let coordinator = makeCoordinator(
+                recognizer: MetadataRecognizer(transcript: transcript),
+                localRewriter: rewriter,
+                insertion: insertion
             )
-        )
-        let retainedTurboInsertion = RecordingInsertion()
-        let retainedTurboRewriter = RecordingTextRewriter(output: "Nicht verwenden.")
-        let retainedTurboCoordinator = makeCoordinator(
-            recognizer: MetadataRecognizer(transcript: retainedTurboTranscript),
-            localRewriter: retainedTurboRewriter,
-            insertion: retainedTurboInsertion
-        )
-
-        let retainedTurboSessionID = startedSessionID(
-            await retainedTurboCoordinator.start(language: .german)
-        )
-        let retainedTurboOutcome = await retainedTurboCoordinator.stop(
-            sessionID: retainedTurboSessionID
-        )
-        let retainedTurboCandidates = await retainedTurboInsertion.candidates()
-        let retainedTurboRewriteCount = await retainedTurboRewriter.rewriteCount()
-
-        XCTAssertEqual(
-            retainedTurboOutcome,
-            .completed(retainedTurboSessionID, .confirmedDirect)
-        )
-        XCTAssertEqual(
-            retainedTurboCandidates,
-            [.local(LocalCandidate(text: healthyText))]
-        )
-        XCTAssertEqual(retainedTurboRewriteCount, 0)
+            let sessionID = startedSessionID(await coordinator.start(language: .german))
+            let outcome = await coordinator.stop(sessionID: sessionID)
+            let candidates = await insertion.candidates()
+            let rewriteCount = await rewriter.rewriteCount()
+            XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect))
+            XCTAssertEqual(candidates, [.local(LocalCandidate(text: healthyText))])
+            XCTAssertEqual(rewriteCount, 0)
+        }
     }
 
     func testAdaptiveFallbackDoesNotBypassRewriteForDamagedSelectedTranscript() async {
