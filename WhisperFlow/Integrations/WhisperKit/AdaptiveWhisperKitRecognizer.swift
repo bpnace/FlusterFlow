@@ -1,4 +1,36 @@
 import Foundation
+import OSLog
+
+private enum AdaptivePerformanceBackend: String {
+    case turbo
+    case large
+    case none
+}
+
+private enum AdaptivePerformanceOutcome: String {
+    case turboSelected
+    case largeSelected
+    case turboRetained
+    case deadlineExceeded
+    case failure
+    case cancelled
+}
+
+private enum AdaptivePerformanceFallbackCategory: String, Hashable {
+    case backendFailureTurbo = "backend_failure_turbo"
+    case backendFailureLarge = "backend_failure_large"
+    case backendFailureOther = "backend_failure_other"
+    case lowAverageLogprob = "low_average_logprob"
+    case lowWordProbability = "low_word_probability"
+    case highCompressionRatio = "high_compression_ratio"
+    case decoderFallback = "decoder_fallback"
+    case unresolvedPrioritizedLexicon = "unresolved_prioritized_lexicon"
+    case suspiciousSentenceStructure = "suspicious_sentence_structure"
+    case emptyTranscript = "empty_transcript"
+    case repetition
+    case severeOmission = "severe_omission"
+    case largeLowerQuality = "large_lower_quality"
+}
 
 struct AdaptiveWhisperKitPolicy: Sendable {
     var lowAverageLogprobThreshold: Float = -0.8
@@ -38,7 +70,19 @@ struct AdaptiveWhisperKitPolicy: Sendable {
         if !unresolvedTerms.isEmpty {
             reasons.append(.unresolvedPrioritizedLexicon(unresolvedTerms))
         }
-        if hasSuspiciousSentenceStructure(transcript.text) {
+        // A short run of function words also occurs in valid sentences. Require
+        // acoustic uncertainty for that weak signal; repeated phrases and
+        // overwhelmingly repetitive connector output remain unconditional.
+        let words = normalizedWords(in: transcript.text)
+        let strongStructureDamage = hasImmediateRepeatedPhrase(words)
+            || (words.count >= 8 && Float(Set(words).count) / Float(words.count) <= 0.6
+                && Float(words.filter { Self.connectorWords.contains($0) }.count)
+                    / Float(words.count) >= 0.75)
+        let uncertainStructure = (transcript.avgLogprob.map { $0 < marginalAverageLogprobThreshold } ?? false)
+            || (transcript.minWordProbability.map { $0 < marginalWordProbabilityThreshold } ?? false)
+            || (transcript.compressionRatio.map { $0 > elevatedCompressionRatioThreshold } ?? false)
+            || (transcript.avgLogprob == nil && transcript.minWordProbability == nil)
+        if hasSuspiciousSentenceStructure(transcript.text), strongStructureDamage || uncertainStructure {
             reasons.append(.suspiciousSentenceStructure)
         }
         return reasons
@@ -57,7 +101,14 @@ struct AdaptiveWhisperKitPolicy: Sendable {
         }
         let turboWords = wordCount(turbo.text)
         let largeWords = wordCount(large.text)
-        if turboWords > 0,
+        // Repeated decoder output inflates the reference length. It is not
+        // evidence that the shorter, non-repetitive alternative omitted speech.
+        let turboTokens = normalizedWords(in: turbo.text)
+        let hasInflatedReference = turboTokens.count >= 8 && (
+            hasImmediateRepeatedPhrase(turboTokens)
+                || Float(Set(turboTokens).count) / Float(turboTokens.count) < 0.45
+        )
+        if !hasInflatedReference, turboWords > 0,
            Float(largeWords) < Float(turboWords) * severeOmissionRatio {
             return .severeOmission
         }
@@ -280,6 +331,10 @@ actor AdaptiveWhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
     private let turbo: any SpeechRecognizing
     private let large: any SpeechRecognizing
     private let policy: AdaptiveWhisperKitPolicy
+    private let performanceLogger = Logger(
+        subsystem: "local.flusterflow",
+        category: "performance"
+    )
 
     init(
         turbo: any SpeechRecognizing,
@@ -296,37 +351,93 @@ actor AdaptiveWhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         hints: RecognitionHints,
         sessionID: DictationSessionID
     ) async throws -> RawTranscript {
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        var attemptedBackends: [AdaptivePerformanceBackend] = []
+        var selectedBackend: AdaptivePerformanceBackend = .none
+        var fallbackCategories: [AdaptivePerformanceFallbackCategory] = []
+        var outcome: AdaptivePerformanceOutcome = .failure
+        var turboAverageLogprob: Float?
+        var turboCompressionRatio: Float?
+        var largeAverageLogprob: Float?
+        var largeCompressionRatio: Float?
+        defer {
+            let durationMilliseconds = startedAt
+                .duration(to: clock.now)
+                .adaptivePerformanceMilliseconds
+            let attempted = attemptedBackends.isEmpty
+                ? AdaptivePerformanceBackend.none.rawValue
+                : attemptedBackends.map(\.rawValue).joined(separator: ",")
+            let reasons = fallbackCategories.isEmpty
+                ? "none"
+                : fallbackCategories.map(\.rawValue).joined(separator: ",")
+            performanceLogger.info(
+                "performance=adaptiveDecision attempted_backends=\(attempted, privacy: .public) selected_backend=\(selectedBackend.rawValue, privacy: .public) outcome=\(outcome.rawValue, privacy: .public) fallback_reasons=\(reasons, privacy: .public) turbo_avg_logprob_present=\(turboAverageLogprob != nil, privacy: .public) turbo_avg_logprob=\(turboAverageLogprob ?? -999, privacy: .public) turbo_compression_ratio_present=\(turboCompressionRatio != nil, privacy: .public) turbo_compression_ratio=\(turboCompressionRatio ?? -1, privacy: .public) large_avg_logprob_present=\(largeAverageLogprob != nil, privacy: .public) large_avg_logprob=\(largeAverageLogprob ?? -999, privacy: .public) large_compression_ratio_present=\(largeCompressionRatio != nil, privacy: .public) large_compression_ratio=\(largeCompressionRatio ?? -1, privacy: .public) duration_ms=\(durationMilliseconds, privacy: .public)"
+            )
+        }
+
         let turboResult: RawTranscript
+        attemptedBackends.append(.turbo)
         do {
             turboResult = try await turbo.transcribe(
                 audio,
                 hints: hints,
                 sessionID: sessionID
             )
+            turboAverageLogprob = turboResult.avgLogprob
+            turboCompressionRatio = turboResult.compressionRatio
         } catch is CancellationError {
+            outcome = .cancelled
             throw CancellationError()
         } catch let error as ProductASRDeadlineError {
+            outcome = .deadlineExceeded
             throw error
         } catch {
-            try ProductASRDeadlineContext.requireRemainingBudget()
-            let largeResult = try await large.transcribe(
-                audio,
-                hints: hints,
-                sessionID: sessionID
-            )
-            return annotated(
-                largeResult,
-                selectedBackend: .whisperKitLargeV3,
-                attemptedBackends: [.whisperKitLargeV3Turbo, .whisperKitLargeV3],
-                fallbackReasons: [.backendFailure(.whisperKitLargeV3Turbo)],
-                largeFallbackAccepted: true
-            )
+            fallbackCategories.append(.backendFailureTurbo)
+            do {
+                try ProductASRDeadlineContext.requireRemainingBudget()
+            } catch is ProductASRDeadlineError {
+                outcome = .deadlineExceeded
+                throw ProductASRDeadlineError.exceeded
+            }
+            attemptedBackends.append(.large)
+            do {
+                let largeResult = try await large.transcribe(
+                    audio,
+                    hints: hints,
+                    sessionID: sessionID
+                )
+                largeAverageLogprob = largeResult.avgLogprob
+                largeCompressionRatio = largeResult.compressionRatio
+                selectedBackend = .large
+                outcome = .largeSelected
+                return annotated(
+                    largeResult,
+                    selectedBackend: .whisperKitLargeV3,
+                    attemptedBackends: [.whisperKitLargeV3Turbo, .whisperKitLargeV3],
+                    fallbackReasons: [.backendFailure(.whisperKitLargeV3Turbo)],
+                    largeFallbackAccepted: true
+                )
+            } catch is CancellationError {
+                outcome = .cancelled
+                throw CancellationError()
+            } catch is ProductASRDeadlineError {
+                fallbackCategories.append(.backendFailureLarge)
+                outcome = .deadlineExceeded
+                throw ProductASRDeadlineError.exceeded
+            } catch {
+                fallbackCategories.append(.backendFailureLarge)
+                outcome = .failure
+                throw error
+            }
         }
-        let fallbackReasons = policy.fallbackReasons(
+        let policyFallbackReasons = policy.fallbackReasons(
             for: turboResult,
             hints: hints
         )
-        guard !fallbackReasons.isEmpty else {
+        if policyFallbackReasons.isEmpty {
+            selectedBackend = .turbo
+            outcome = .turboSelected
             return annotated(
                 turboResult,
                 selectedBackend: .whisperKitLargeV3Turbo,
@@ -336,22 +447,35 @@ actor AdaptiveWhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
             )
         }
 
-        try ProductASRDeadlineContext.requireRemainingBudget()
+        fallbackCategories = Self.performanceFallbackCategories(for: policyFallbackReasons)
+        do {
+            try ProductASRDeadlineContext.requireRemainingBudget()
+        } catch is ProductASRDeadlineError {
+            outcome = .deadlineExceeded
+            throw ProductASRDeadlineError.exceeded
+        }
         let largeResult: RawTranscript
+        attemptedBackends.append(.large)
         do {
             largeResult = try await large.transcribe(
                 audio,
                 hints: hints,
                 sessionID: sessionID
             )
+            largeAverageLogprob = largeResult.avgLogprob
+            largeCompressionRatio = largeResult.compressionRatio
         } catch is CancellationError {
+            outcome = .cancelled
             throw CancellationError()
         } catch {
+            fallbackCategories.append(.backendFailureLarge)
+            selectedBackend = .turbo
+            outcome = .turboRetained
             return annotated(
                 turboResult,
                 selectedBackend: .whisperKitLargeV3Turbo,
                 attemptedBackends: [.whisperKitLargeV3Turbo, .whisperKitLargeV3],
-                fallbackReasons: fallbackReasons + [.backendFailure(.whisperKitLargeV3)],
+                fallbackReasons: policyFallbackReasons + [.backendFailure(.whisperKitLargeV3)],
                 largeFallbackAccepted: false
             )
         }
@@ -360,19 +484,26 @@ actor AdaptiveWhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
             large: largeResult,
             hints: hints
         ) {
+            fallbackCategories = Self.performanceFallbackCategories(
+                for: policyFallbackReasons + [turboKeepReason]
+            )
+            selectedBackend = .turbo
+            outcome = .turboRetained
             return annotated(
                 turboResult,
                 selectedBackend: .whisperKitLargeV3Turbo,
                 attemptedBackends: [.whisperKitLargeV3Turbo, .whisperKitLargeV3],
-                fallbackReasons: fallbackReasons + [turboKeepReason],
+                fallbackReasons: policyFallbackReasons + [turboKeepReason],
                 largeFallbackAccepted: false
             )
         }
+        selectedBackend = .large
+        outcome = .largeSelected
         return annotated(
             largeResult,
             selectedBackend: .whisperKitLargeV3,
             attemptedBackends: [.whisperKitLargeV3Turbo, .whisperKitLargeV3],
-            fallbackReasons: fallbackReasons,
+            fallbackReasons: policyFallbackReasons,
             largeFallbackAccepted: true
         )
     }
@@ -475,6 +606,50 @@ actor AdaptiveWhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
         )
     }
 
+    private static func performanceFallbackCategories(
+        for reasons: [AdaptiveFallbackReason]
+    ) -> [AdaptivePerformanceFallbackCategory] {
+        var categories: [AdaptivePerformanceFallbackCategory] = []
+        for reason in reasons {
+            let category: AdaptivePerformanceFallbackCategory
+            switch reason {
+            case .backendFailure(let backend):
+                switch backend {
+                case .whisperKitLargeV3Turbo:
+                    category = .backendFailureTurbo
+                case .whisperKitLargeV3:
+                    category = .backendFailureLarge
+                default:
+                    category = .backendFailureOther
+                }
+            case .lowAverageLogprob:
+                category = .lowAverageLogprob
+            case .lowWordProbability:
+                category = .lowWordProbability
+            case .highCompressionRatio:
+                category = .highCompressionRatio
+            case .decoderFallback:
+                category = .decoderFallback
+            case .unresolvedPrioritizedLexicon:
+                category = .unresolvedPrioritizedLexicon
+            case .suspiciousSentenceStructure:
+                category = .suspiciousSentenceStructure
+            case .emptyTranscript:
+                category = .emptyTranscript
+            case .repetition:
+                category = .repetition
+            case .severeOmission:
+                category = .severeOmission
+            case .largeLowerQuality:
+                category = .largeLowerQuality
+            }
+            if !categories.contains(category) {
+                categories.append(category)
+            }
+        }
+        return categories
+    }
+
     private func callLifecycle(
         on recognizer: any SpeechRecognizing,
         sessionID: DictationSessionID,
@@ -485,5 +660,13 @@ actor AdaptiveWhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycl
             return
         }
         try await operation(lifecycle)
+    }
+}
+
+private extension Duration {
+    var adaptivePerformanceMilliseconds: Double {
+        let components = self.components
+        return (Double(components.seconds) * 1_000)
+            + (Double(components.attoseconds) / 1_000_000_000_000_000)
     }
 }

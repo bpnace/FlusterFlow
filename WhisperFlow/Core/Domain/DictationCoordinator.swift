@@ -1,6 +1,8 @@
 import Foundation
+import OSLog
 
 actor DictationCoordinator {
+    private static let performanceLogger = Logger(subsystem: "local.flusterflow", category: "performance")
     private static let terminalHistoryWriteAttempts = 3
     private static let terminalHistoryWriteRetryDelay = Duration.milliseconds(50)
     private static let incrementalRecognitionStopGrace = Duration.seconds(1)
@@ -319,6 +321,11 @@ actor DictationCoordinator {
 
         guard isCurrent(sessionID, expected: .transcribing) else {
             return .ignoredStale(sessionID)
+        }
+        // Background noise can decode to punctuation without any spoken text.
+        // Stop before cleanup can turn that into an insertable sentence.
+        guard transcript.text.rangeOfCharacter(from: .alphanumerics) != nil else {
+            return await finishAsNoSpeech(sessionID)
         }
         session?.rawTranscript = transcript
         do {
@@ -780,12 +787,16 @@ actor DictationCoordinator {
         context: ContextSnapshot,
         sessionID: DictationSessionID
     ) async -> LocalCandidate {
-        guard let localRewriter else { return candidate }
+        guard let localRewriter else {
+            Self.performanceLogger.info("performance=rewrite outcome=skipped reason=disabled duration_ms=0")
+            return candidate
+        }
         if shouldUseDeterministicCandidateWithoutRewrite(
             candidate,
             transcript: transcript,
             context: context
         ) {
+            Self.performanceLogger.info("performance=rewrite outcome=skipped reason=confidentCoherentText duration_ms=0")
             return candidate
         }
         let result = await localRewriter.rewrite(
@@ -823,7 +834,6 @@ actor DictationCoordinator {
               decoderFallback.occurred == false else {
             return false
         }
-        if transcript.adaptive?.fallbackReasons.isEmpty == false { return false }
         if contextReferenceCanAffectRewrite(
             candidate: candidate.text,
             transcript: transcript.text,

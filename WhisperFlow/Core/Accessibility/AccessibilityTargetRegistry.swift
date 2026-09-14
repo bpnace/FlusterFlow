@@ -436,6 +436,7 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
             return .denied
         }
 
+        let confirmationPlan = makeConfirmationPlan(text, range: commitRange, element: commitEntry.element)
         let execution = permit.performCommit {
             AXUIElementSetAttributeValue(
                 commitEntry.element,
@@ -453,7 +454,8 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
         return await waitForInsertionConfirmation(
             text,
             originalRange: commitRange,
-            element: commitEntry.element
+            element: commitEntry.element,
+            valuePlan: confirmationPlan
         ) ? .confirmed : .unconfirmedMutation
     }
 
@@ -543,6 +545,7 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
             return .denied
         }
 
+        let confirmationPlan = makeConfirmationPlan(text, range: commitRange, element: commitEntry.element)
         let execution = permit.performCommit {
             for pair in eventPairs {
                 pair.keyDown.post(tap: .cghidEventTap)
@@ -556,7 +559,8 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
         return await waitForInsertionConfirmation(
             text,
             originalRange: commitRange,
-            element: commitEntry.element
+            element: commitEntry.element,
+            valuePlan: confirmationPlan
         ) ? .confirmed : .unconfirmedMutation
     }
 
@@ -978,6 +982,17 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
         )
     }
 
+    private func makeConfirmationPlan(_ text: String, range: CFRange,
+                                      element: AXUIElement) -> AXValueInsertionPlan? {
+        guard let count = copyIntegerAttribute(kAXNumberOfCharactersAttribute as String, from: element),
+              count >= 0, count <= AXValueInsertionPlanner.maximumUTF16Length,
+              let original = copyStringAttribute(kAXValueAttribute as String, from: element),
+              let plan = AXValueInsertionPlanner.makePlan(original: original,
+                  selectionLocation: range.location, selectionLength: range.length, replacement: text),
+              plan.value != original else { return nil }
+        return plan
+    }
+
     private func confirmsInsertion(
         _ text: String,
         originalRange: CFRange,
@@ -987,12 +1002,21 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
             location: originalRange.location,
             length: text.utf16.count
         )
-        guard copyString(for: insertedRange, from: element) == text,
-              let currentRange = copySelectedRange(from: element) else {
-            return false
+        guard let currentRange = copySelectedRange(from: element),
+              currentRange.location == originalRange.location + text.utf16.count,
+              currentRange.length == 0 else { return false }
+        if let rangedText = copyString(for: insertedRange, from: element) {
+            return rangedText == text
         }
-        return currentRange.location == originalRange.location + text.utf16.count
-            && currentRange.length == 0
+        // Some Electron editors expose AXValue but not AXStringForRange.
+        // Confirm the exact UTF-16 span, never just the presence of the text.
+        guard let count = copyIntegerAttribute(kAXNumberOfCharactersAttribute as String, from: element),
+              count >= 0, count <= AXValueInsertionPlanner.maximumUTF16Length,
+              let value = copyStringAttribute(kAXValueAttribute as String, from: element) else { return false }
+        return AXInsertionRangeVerifier.confirms(
+            value: value, insertedText: text, location: originalRange.location,
+            selectionLocation: currentRange.location, selectionLength: currentRange.length
+        )
     }
 
     private func confirmsValueInsertion(
@@ -1012,9 +1036,14 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
     private func waitForInsertionConfirmation(
         _ text: String,
         originalRange: CFRange,
-        element: AXUIElement
+        element: AXUIElement,
+        valuePlan: AXValueInsertionPlan? = nil
     ) async -> Bool {
-        for attempt in 0..<10 {
+        for attempt in 0..<50 {
+            if let valuePlan,
+               copyStringAttribute(kAXValueAttribute as String, from: element) == valuePlan.value {
+                return true
+            }
             if confirmsInsertion(
                 text,
                 originalRange: originalRange,
@@ -1022,7 +1051,7 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
             ) {
                 return true
             }
-            if attempt < 9 {
+            if attempt < 49 {
                 try? await Task.sleep(for: .milliseconds(20))
             }
         }
@@ -1033,11 +1062,11 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
         _ plan: AXValueInsertionPlan,
         element: AXUIElement
     ) async -> Bool {
-        for attempt in 0..<10 {
+        for attempt in 0..<50 {
             if confirmsValueInsertion(plan, element: element) {
                 return true
             }
-            if attempt < 9 {
+            if attempt < 49 {
                 try? await Task.sleep(for: .milliseconds(20))
             }
         }
@@ -1049,7 +1078,7 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
         originalValue: String,
         element: AXUIElement
     ) async -> Bool {
-        for attempt in 0..<10 {
+        for attempt in 0..<50 {
             if let currentValue = copyTextMarkerString(from: element),
                AXValueMutationVerifier.confirmsSingleReplacement(
                 original: originalValue,
@@ -1058,7 +1087,7 @@ actor AccessibilityTargetRegistry: AccessibilityTargetAccessing {
             ) {
                 return true
             }
-            if attempt < 9 {
+            if attempt < 49 {
                 try? await Task.sleep(for: .milliseconds(20))
             }
         }
@@ -1702,5 +1731,21 @@ enum AXValueMutationVerifier {
 private extension String {
     func prefixString(_ maximumCharacters: Int) -> String {
         String(prefix(maximumCharacters))
+    }
+}
+
+/// Value-based readback for editors without the parameterized range attribute.
+enum AXInsertionRangeVerifier {
+    static func confirms(value: String, insertedText: String, location: Int,
+                         selectionLocation: Int, selectionLength: Int) -> Bool {
+        let valueLength = value.utf16.count
+        let insertedLength = insertedText.utf16.count
+        guard !insertedText.isEmpty,
+              valueLength <= AXValueInsertionPlanner.maximumUTF16Length,
+              location >= 0, location <= valueLength,
+              insertedLength <= valueLength - location,
+              selectionLength == 0,
+              selectionLocation == location + insertedLength else { return false }
+        return (value as NSString).substring(with: NSRange(location: location, length: insertedLength)) == insertedText
     }
 }

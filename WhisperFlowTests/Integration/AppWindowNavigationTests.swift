@@ -91,6 +91,15 @@ final class AppWindowNavigationTests: XCTestCase {
         XCTAssertEqual(recordingsItem.keyEquivalentModifierMask, [.command])
     }
 
+    func testHandsFreeCanBeStartedFromMenuWithoutGlobalShortcut() throws {
+        let delegate = AppDelegate()
+        let menu = delegate.makeMenu()
+        let item = try XCTUnwrap(menu.items.first { $0.title == "Handsfree-Diktat starten" })
+        XCTAssertTrue(item.target === delegate)
+        XCTAssertNotNil(item.action)
+        XCTAssertEqual(item.keyEquivalent, "")
+    }
+
     func testFlowBarPanelCannotBecomeKeyOrMain() {
         let flowBar = FlowBarController()
 

@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var serviceStatusItem: NSMenuItem?
     private var cancelStatusItem: NSMenuItem?
+    private var startStatusItem: NSMenuItem?
     private var didStartRuntime = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -73,6 +74,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         serviceStatusItem = status
         menu.addItem(status)
 
+        let start = menu.addItem(
+            withTitle: "Handsfree-Diktat starten",
+            action: #selector(startHandsFreeDictation),
+            keyEquivalent: ""
+        )
+        start.target = self
+        startStatusItem = start
+
         let cancel = NSMenuItem(
             title: "Aktives Diktat abbrechen",
             action: #selector(cancelActiveDictation),
@@ -121,10 +130,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshServiceStatus()
         cancelStatusItem?.isHidden = !environment.canCancelActiveOperation
         cancelStatusItem?.isEnabled = environment.canCancelActiveOperation
+        startStatusItem?.isEnabled = !environment.canCancelActiveOperation
     }
 
     private func refreshServiceStatus() {
         serviceStatusItem?.title = environment.serviceStatusTitle
+    }
+
+    @objc
+    private func startHandsFreeDictation() {
+        environment.startHandsFreeDictation()
     }
 
     @objc

@@ -2,6 +2,28 @@ import XCTest
 @testable import WhisperFlow
 
 final class DictationActivationReducerTests: XCTestCase {
+    func testButtonPromotionIgnoresHeldShortcutReleaseAndAllowsShortcutStop() {
+        var reducer = DictationActivationReducer(mode: .disabled)
+        XCTAssertEqual(reducer.consume(.pressed, at: 0), .beginPushToTalk)
+        reducer.switchToHandsFree()
+        XCTAssertEqual(reducer.consume(.released, at: 2), .none)
+        XCTAssertTrue(reducer.isHandsFreeActive)
+        XCTAssertEqual(reducer.consume(.pressed, at: 3), .endHandsFree)
+        XCTAssertEqual(reducer.consume(.released, at: 4), .none)
+    }
+
+    func testButtonPromotionClearsPendingDoubleTapAndResetAllowsNextDictation() {
+        var reducer = DictationActivationReducer(mode: .doubleTap)
+        _ = reducer.consume(.pressed, at: 0)
+        _ = reducer.consume(.released, at: 0.1)
+        reducer.switchToHandsFree()
+        XCTAssertNil(reducer.secondTapDeadline)
+        XCTAssertTrue(reducer.isHandsFreeActive)
+        reducer.reset()
+        XCTAssertEqual(reducer.consume(.released, at: 0.2), .none)
+        XCTAssertEqual(reducer.consume(.pressed, at: 1), .beginPushToTalk)
+    }
+
     func testDisabledModePreservesSingleHold() {
         var reducer = DictationActivationReducer(mode: .disabled)
         XCTAssertEqual(reducer.consume(.pressed, at: 0), .beginPushToTalk)

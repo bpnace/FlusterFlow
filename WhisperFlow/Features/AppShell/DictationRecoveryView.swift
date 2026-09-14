@@ -26,7 +26,7 @@ final class DictationRecoveryModel: ObservableObject {
             errorMessage = failure.title
             shouldPresent = true
         case .completed(_, .safeFallback):
-            errorMessage = "Der Text konnte nicht sicher eingefügt werden."
+            errorMessage = "Die Einfügung konnte nicht bestätigt werden. Prüfe das Textfeld, bevor du den erhaltenen Text erneut einfügst."
             shouldPresent = true
         case .completed(_, .confirmedDirect), .noSpeech: errorMessage = nil
         case .ignoredDuplicate, .ignoredStale: return false

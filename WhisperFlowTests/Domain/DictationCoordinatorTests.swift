@@ -606,6 +606,40 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(insertionCount, 0)
     }
 
+    func testPunctuationOnlyRecognitionDoesNotInsertOrRetainAudio() async {
+        for text in ["-", "-. ", " … — \n", ""] {
+            let audio = StoredAudioCapture()
+            let insertion = RecordingInsertion()
+            let coordinator = makeCoordinator(
+                audioCapture: audio,
+                recognizer: MetadataRecognizer(transcript: RawTranscript(text: text, language: .german)),
+                insertion: insertion
+            )
+            let sessionID = startedSessionID(await coordinator.start())
+            let outcome = await coordinator.stop(sessionID: sessionID)
+            let insertionCount = await insertion.count()
+            let releaseCount = await audio.releaseCount()
+            XCTAssertEqual(outcome, .noSpeech(sessionID), text)
+            XCTAssertEqual(insertionCount, 0, text)
+            XCTAssertEqual(releaseCount, 1, text)
+        }
+    }
+
+    func testMinimalSpokenTextStillInserts() async {
+        for text in ["Ja", "7", "你好"] {
+            let insertion = RecordingInsertion()
+            let coordinator = makeCoordinator(
+                recognizer: MetadataRecognizer(transcript: RawTranscript(text: text, language: .german)),
+                insertion: insertion
+            )
+            let sessionID = startedSessionID(await coordinator.start())
+            let outcome = await coordinator.stop(sessionID: sessionID)
+            let insertionCount = await insertion.count()
+            XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect), text)
+            XCTAssertEqual(insertionCount, 1, text)
+        }
+    }
+
     func testLocalOnlyUsesValidatedOnDeviceRewriteBeforeInsertion() async {
         let insertion = RecordingInsertion()
         let rewriter = RecordingTextRewriter(output: "Hallo Welt.")
@@ -824,6 +858,79 @@ final class DictationCoordinatorTests: XCTestCase, @unchecked Sendable {
             [.local(LocalCandidate(text: "Rewritten context dependent."))]
         )
         XCTAssertEqual(contextRewriteCount, 1)
+    }
+
+    func testAdaptiveFallbackReasonsDoNotForceRewriteForAHealthySelectedTranscript() async {
+        let healthyText = "Heute planen wir gemeinsam die Arbeit."
+        for selectedBackend: RecognitionBackend in [.whisperKitLargeV3, .whisperKitLargeV3Turbo] {
+            let acceptedLarge = selectedBackend == .whisperKitLargeV3
+            let transcript = RawTranscript(
+                text: healthyText,
+                language: .german,
+                backend: selectedBackend,
+                avgLogprob: -0.1,
+                minWordProbability: 0.95,
+                compressionRatio: 1.0,
+                decoderFallback: RecognitionDecoderFallback.none,
+                adaptive: AdaptiveRecognitionMetadata(
+                    attemptedBackends: [.whisperKitLargeV3Turbo, .whisperKitLargeV3],
+                    selectedBackend: selectedBackend,
+                    fallbackReasons: acceptedLarge ? [.lowAverageLogprob(-0.95)] : [.largeLowerQuality],
+                    largeFallbackAccepted: acceptedLarge
+                )
+            )
+            let insertion = RecordingInsertion()
+            let rewriter = RecordingTextRewriter(output: "Nicht verwenden.")
+            let coordinator = makeCoordinator(
+                recognizer: MetadataRecognizer(transcript: transcript),
+                localRewriter: rewriter,
+                insertion: insertion
+            )
+            let sessionID = startedSessionID(await coordinator.start(language: .german))
+            let outcome = await coordinator.stop(sessionID: sessionID)
+            let candidates = await insertion.candidates()
+            let rewriteCount = await rewriter.rewriteCount()
+            XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect))
+            XCTAssertEqual(candidates, [.local(LocalCandidate(text: healthyText))])
+            XCTAssertEqual(rewriteCount, 0)
+        }
+    }
+
+    func testAdaptiveFallbackDoesNotBypassRewriteForDamagedSelectedTranscript() async {
+        let damagedTranscript = RawTranscript(
+            text: "Wir testen wir testen das.",
+            language: .german,
+            backend: .whisperKitLargeV3,
+            avgLogprob: -0.1,
+            minWordProbability: 0.95,
+            compressionRatio: 1.0,
+            decoderFallback: RecognitionDecoderFallback.none,
+            adaptive: AdaptiveRecognitionMetadata(
+                attemptedBackends: [.whisperKitLargeV3Turbo, .whisperKitLargeV3],
+                selectedBackend: .whisperKitLargeV3,
+                fallbackReasons: [.lowAverageLogprob(-0.95)],
+                largeFallbackAccepted: true
+            )
+        )
+        let insertion = RecordingInsertion()
+        let rewriter = RecordingTextRewriter(output: "Wir testen das.")
+        let coordinator = makeCoordinator(
+            recognizer: MetadataRecognizer(transcript: damagedTranscript),
+            localRewriter: rewriter,
+            insertion: insertion
+        )
+        let sessionID = startedSessionID(await coordinator.start(language: .german))
+
+        let outcome = await coordinator.stop(sessionID: sessionID)
+        let candidates = await insertion.candidates()
+        let rewriteCount = await rewriter.rewriteCount()
+
+        XCTAssertEqual(outcome, .completed(sessionID, .confirmedDirect))
+        XCTAssertEqual(
+            candidates,
+            [.local(LocalCandidate(text: "Wir testen das."))]
+        )
+        XCTAssertEqual(rewriteCount, 1)
     }
 
     func testCloudSuccessRunsCloudAsTheOnlyPrimaryRewriter() async {

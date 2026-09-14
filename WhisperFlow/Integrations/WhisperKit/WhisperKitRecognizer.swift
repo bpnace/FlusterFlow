@@ -62,6 +62,30 @@ enum WhisperKitFailureCode: String, Equatable, Sendable {
     case unknown
 }
 
+private enum WhisperKitPerformanceBackend: String {
+    case turbo
+    case large
+    case unspecified
+}
+
+private enum WhisperKitPreparationOperation: String {
+    case transcription
+    case prewarm
+}
+
+private enum WhisperKitPreparationPath: String {
+    case ready
+    case waiting
+    case prepared
+    case loading
+}
+
+private enum WhisperKitPerformanceOutcome: String {
+    case success
+    case failure
+    case cancelled
+}
+
 actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
     static let promptTokenBudget = 128
 
@@ -85,6 +109,10 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
     private let runtime: any WhisperKitRuntimeServing
     private let backend: RecognitionBackend?
     private let logger = Logger(subsystem: "local.flusterflow", category: "asr")
+    private let performanceLogger = Logger(
+        subsystem: "local.flusterflow",
+        category: "performance"
+    )
     private var runtimePrepared = false
     private var runtimePrewarmed = false
     private var nextPrepareOperationID: UInt64 = 0
@@ -113,7 +141,12 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
         sessionID: DictationSessionID
     ) async throws -> RawTranscript {
         do {
-            try await prepareIfNeeded()
+            try await measurePreparation(
+                operation: .transcription,
+                path: preparationPathForTranscription()
+            ) {
+                try await prepareIfNeeded()
+            }
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -138,13 +171,15 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
 
         let result: WhisperKitRecognitionResult
         do {
-            try Task.checkCancellation()
-            result = try await runtime.transcribe(
-                samples: audioSamples.values,
-                language: Self.languageMode(for: hints.language),
-                promptTokens: [],
-                sessionID: sessionID
-            )
+            result = try await measureDecode(sampleCount: audioSamples.values.count) {
+                try Task.checkCancellation()
+                return try await runtime.transcribe(
+                    samples: audioSamples.values,
+                    language: Self.languageMode(for: hints.language),
+                    promptTokens: [],
+                    sessionID: sessionID
+                )
+            }
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -232,38 +267,43 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
     }
 
     func prewarm() async throws {
-        if runtimePrewarmed { return }
-        if let operation = prewarmOperation {
-            try await awaitPrewarm(operation)
-            return
-        }
-        if let operation = prepareOperation {
-            try await awaitPrepare(operation)
-        }
+        try await measurePreparation(
+            operation: .prewarm,
+            path: preparationPathForPrewarm()
+        ) {
+            if runtimePrewarmed { return }
+            if let operation = prewarmOperation {
+                try await awaitPrewarm(operation)
+                return
+            }
+            if let operation = prepareOperation {
+                try await awaitPrepare(operation)
+            }
 
-        let modelDirectory = try await modelStore.validatedDirectory()
-        let tokenizerDirectory = try await tokenizerStore.validatedDirectory()
-        if runtimePrewarmed { return }
-        if let operation = prewarmOperation {
-            try await awaitPrewarm(operation)
-            return
-        }
-        if let operation = prepareOperation {
-            try await awaitPrepare(operation)
-        }
+            let modelDirectory = try await modelStore.validatedDirectory()
+            let tokenizerDirectory = try await tokenizerStore.validatedDirectory()
+            if runtimePrewarmed { return }
+            if let operation = prewarmOperation {
+                try await awaitPrewarm(operation)
+                return
+            }
+            if let operation = prepareOperation {
+                try await awaitPrepare(operation)
+            }
 
-        nextPrewarmOperationID &+= 1
-        let operationID = nextPrewarmOperationID
-        let runtime = runtime
-        let task = Task<Void, Error> {
-            try await runtime.prewarm(
-                modelDirectory: modelDirectory,
-                tokenizerDirectory: tokenizerDirectory
-            )
+            nextPrewarmOperationID &+= 1
+            let operationID = nextPrewarmOperationID
+            let runtime = runtime
+            let task = Task<Void, Error> {
+                try await runtime.prewarm(
+                    modelDirectory: modelDirectory,
+                    tokenizerDirectory: tokenizerDirectory
+                )
+            }
+            let operation = PrewarmOperation(id: operationID, task: task)
+            prewarmOperation = operation
+            try await awaitPrewarm(operation)
         }
-        let operation = PrewarmOperation(id: operationID, task: task)
-        prewarmOperation = operation
-        try await awaitPrewarm(operation)
     }
 
     func unload() async {
@@ -308,6 +348,89 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
         let operation = PrepareOperation(id: operationID, task: task)
         prepareOperation = operation
         try await awaitPrepare(operation)
+    }
+
+    private func preparationPathForTranscription() -> WhisperKitPreparationPath {
+        if runtimePrepared { return .ready }
+        if prewarmOperation != nil || prepareOperation != nil { return .waiting }
+        return .loading
+    }
+
+    private func preparationPathForPrewarm() -> WhisperKitPreparationPath {
+        if runtimePrewarmed { return .ready }
+        if prewarmOperation != nil || prepareOperation != nil { return .waiting }
+        if runtimePrepared { return .prepared }
+        return .loading
+    }
+
+    private func measurePreparation(
+        operation: WhisperKitPreparationOperation,
+        path: WhisperKitPreparationPath,
+        work: () async throws -> Void
+    ) async throws {
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        var outcome: WhisperKitPerformanceOutcome = .failure
+        defer {
+            let durationMilliseconds = startedAt
+                .duration(to: clock.now)
+                .whisperKitPerformanceMilliseconds
+            performanceLogger.info(
+                "performance=asrPreparation operation=\(operation.rawValue, privacy: .public) backend=\(self.performanceBackend.rawValue, privacy: .public) path=\(path.rawValue, privacy: .public) outcome=\(outcome.rawValue, privacy: .public) duration_ms=\(durationMilliseconds, privacy: .public)"
+            )
+        }
+
+        do {
+            try await work()
+            outcome = .success
+        } catch is CancellationError {
+            outcome = .cancelled
+            throw CancellationError()
+        } catch {
+            throw error
+        }
+    }
+
+    private func measureDecode(
+        sampleCount: Int,
+        work: () async throws -> WhisperKitRecognitionResult
+    ) async throws -> WhisperKitRecognitionResult {
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        var outcome: WhisperKitPerformanceOutcome = .failure
+        defer {
+            let durationMilliseconds = startedAt
+                .duration(to: clock.now)
+                .whisperKitPerformanceMilliseconds
+            let audioDurationMilliseconds = Double(sampleCount)
+                / Double(AudioSamples.recognizerSampleRate)
+                * 1_000
+            performanceLogger.info(
+                "performance=asrDecode backend=\(self.performanceBackend.rawValue, privacy: .public) outcome=\(outcome.rawValue, privacy: .public) audio_duration_ms=\(audioDurationMilliseconds, privacy: .public) duration_ms=\(durationMilliseconds, privacy: .public)"
+            )
+        }
+
+        do {
+            let result = try await work()
+            outcome = .success
+            return result
+        } catch is CancellationError {
+            outcome = .cancelled
+            throw CancellationError()
+        } catch {
+            throw error
+        }
+    }
+
+    private var performanceBackend: WhisperKitPerformanceBackend {
+        switch backend {
+        case .whisperKitLargeV3Turbo:
+            return .turbo
+        case .whisperKitLargeV3:
+            return .large
+        default:
+            return .unspecified
+        }
     }
 
     private func awaitPrepare(_ operation: PrepareOperation) async throws {
@@ -545,13 +668,35 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
         let options = Self.decodingOptions(language: language, promptTokens: promptTokens)
 
         return try await runTrackedTranscription(sessionID: sessionID) {
-            let results = try await runtime.whisperKit.transcribe(
-                audioArray: samples,
-                decodeOptions: options
-            )
+            // The installed decoder has a 128-token cache. Split long audio
+            // at quiet boundaries before decoding to reduce the risk of a full
+            // 30-second window exhausting the cache and omitting speech.
+            let chunks = try await Self.finalAudioChunks(samples)
+            var results: [TranscriptionResult] = []
+            for chunk in chunks {
+                try Task.checkCancellation()
+                results += try await runtime.whisperKit.transcribe(
+                    audioArray: chunk.audioSamples,
+                    decodeOptions: options
+                )
+            }
             try Task.checkCancellation()
             return Self.recognitionResult(from: results)
         }
+    }
+
+    nonisolated static func finalAudioChunks(_ samples: [Float]) async throws -> [AudioChunk] {
+        guard samples.count > 20 * AudioSamples.recognizerSampleRate else {
+            return [AudioChunk(seekOffsetIndex: 0, audioSamples: samples)]
+        }
+        return try await VADAudioChunker(
+            windowPadding: 0,
+            vad: EnergyVAD(frameLength: 0.02, frameOverlap: 0.01, energyThreshold: 0.005)
+        ).chunkAll(
+            audioArray: samples,
+            maxChunkLength: 20 * AudioSamples.recognizerSampleRate,
+            decodeOptions: nil
+        )
     }
 
     func cancel(sessionID: DictationSessionID) async {
@@ -670,6 +815,14 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
         _ segments: [RecognitionSegmentMetadata]
     ) -> Float? {
         segments.flatMap(\.wordProbabilities).map(\.probability).min()
+    }
+}
+
+private extension Duration {
+    var whisperKitPerformanceMilliseconds: Double {
+        let components = self.components
+        return (Double(components.seconds) * 1_000)
+            + (Double(components.attoseconds) / 1_000_000_000_000_000)
     }
 }
 

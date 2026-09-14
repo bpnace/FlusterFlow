@@ -1,10 +1,12 @@
 import Foundation
+import OSLog
 
 #if canImport(FoundationModels)
 import FoundationModels
 
 @available(macOS 26.0, *)
 actor AppleFoundationModelsLocalRewriteModel: LocalRewriteModeling {
+    private static let performanceLogger = Logger(subsystem: "local.flusterflow", category: "performance")
     private let systemModel: SystemLanguageModel
     private var prewarmedSessions: [DictationSessionID: LanguageModelSession] = [:]
 
@@ -37,29 +39,64 @@ actor AppleFoundationModelsLocalRewriteModel: LocalRewriteModeling {
             )
         }
 
-        let session = prewarmedSessions.removeValue(forKey: request.sessionID)
-            ?? makeRewriteSession()
-        let response = try await session.respond(
-            generating: FoundationModelsRewriteOutput.self,
-            includeSchemaInPrompt: true,
-            options: GenerationOptions(
-                sampling: .greedy,
-                temperature: 0,
-                maximumResponseTokens: 192
+        let warmedSession = prewarmedSessions.removeValue(forKey: request.sessionID)
+        let session = warmedSession ?? makeRewriteSession()
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let hadPrewarmedSession = warmedSession != nil
+        var succeeded = false
+        defer {
+            let elapsed = (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
+            Self.performanceLogger.info("performance=rewriteGeneration prewarmed_session=\(hadPrewarmedSession, privacy: .public) succeeded=\(succeeded, privacy: .public) duration_ms=\(elapsed, privacy: .public)")
+        }
+        do {
+            let response = try await session.respond(
+                generating: FoundationModelsRewriteOutput.self,
+                includeSchemaInPrompt: true,
+                options: GenerationOptions(
+                    sampling: .greedy,
+                    temperature: 0,
+                    maximumResponseTokens: 192
+                )
+            ) {
+                prompt(for: request)
+            }
+            let text = response.content.rewrittenText
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                throw LocalRewriteModelError.invalidOutput
+            }
+            let inputWords = request.localCandidate.text.split(whereSeparator: { $0.isWhitespace }).count
+            let outputWords = text.split(whereSeparator: { $0.isWhitespace }).count
+            Self.performanceLogger.info("performance=rewriteOutput input_words=\(inputWords, privacy: .public) output_words=\(outputWords, privacy: .public)")
+            succeeded = true
+            return LocalRewriteModelResponse(
+                rewrittenText: text,
+                usedContextTerms: response.content.usedContextTerms,
+                hasAmbiguity: response.content.hasAmbiguity
             )
-        ) {
-            prompt(for: request)
+        } catch {
+            let code = Self.generationFailureCode(error)
+            Self.performanceLogger.info("performance=rewriteGenerationFailure code=\(code, privacy: .public)")
+            throw error
         }
-        let text = response.content.rewrittenText
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
-            throw LocalRewriteModelError.invalidOutput
+    }
+
+    private static func generationFailureCode(_ error: Error) -> String {
+        guard let error = error as? LanguageModelSession.GenerationError else {
+            return error is CancellationError ? "cancelled" : "other"
         }
-        return LocalRewriteModelResponse(
-            rewrittenText: text,
-            usedContextTerms: response.content.usedContextTerms,
-            hasAmbiguity: response.content.hasAmbiguity
-        )
+        switch error {
+        case .exceededContextWindowSize: return "contextWindowExceeded"
+        case .assetsUnavailable: return "assetsUnavailable"
+        case .guardrailViolation: return "guardrailViolation"
+        case .unsupportedGuide: return "unsupportedGuide"
+        case .unsupportedLanguageOrLocale: return "unsupportedLanguage"
+        case .decodingFailure: return "decodingFailure"
+        case .rateLimited: return "rateLimited"
+        case .concurrentRequests: return "concurrentRequests"
+        case .refusal: return "refusal"
+        @unknown default: return "unknown"
+        }
     }
 
     func prewarm(request: LocalRewriteModelPrewarmRequest) async throws {
@@ -77,6 +114,7 @@ actor AppleFoundationModelsLocalRewriteModel: LocalRewriteModeling {
         prewarmedSessions.removeAll(keepingCapacity: true)
         prewarmedSessions[request.sessionID] = session
         session.prewarm(promptPrefix: Prompt(request.promptPrefix))
+        Self.performanceLogger.info("performance=rewritePrewarm state=requested")
     }
 
     private func makeRewriteSession() -> LanguageModelSession {

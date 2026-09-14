@@ -44,6 +44,7 @@ enum DictationFailureReason: Equatable, Sendable {
     case serviceFailure
     case recognitionTimedOut
     case recognizerBusy
+    case insertionUnconfirmed
 }
 
 struct DictationFailure: Equatable, Sendable {
@@ -54,6 +55,7 @@ struct DictationFailure: Equatable, Sendable {
         switch reason {
         case .recognitionTimedOut: return "Erkennung dauert zu lange"
         case .recognizerBusy: return "Erkennung beschäftigt"
+        case .insertionUnconfirmed: return "Einfügung unbestätigt"
         case .serviceFailure: break
         }
         switch stage {
@@ -70,6 +72,7 @@ struct DictationFailure: Equatable, Sendable {
         switch reason {
         case .recognitionTimedOut: return "Spracherkennung dauert zu lange"
         case .recognizerBusy: return "Spracherkennung noch beschäftigt"
+        case .insertionUnconfirmed: return "Einfügung nicht bestätigt – Textfeld prüfen"
         case .serviceFailure: break
         }
         switch stage {

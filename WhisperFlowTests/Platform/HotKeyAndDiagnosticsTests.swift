@@ -554,6 +554,9 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
             let renderer = ImageRenderer(
                 content: FlowBarView(
                     presentation: presentation,
+                    recordingStartedAt: presentation == .listening ? Date().addingTimeInterval(-65) : nil,
+                    handsFree: colorScheme == .dark,
+                    recordingAction: presentation == .listening ? {} : nil,
                     cancel: cancel,
                     animationEnabled: false
                 )
@@ -595,6 +598,13 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
             try png.write(to: previewURL, options: .atomic)
             print("FLOWBAR_PREVIEW_PATH=\(previewURL.path)")
         }
+    }
+
+    func testUnconfirmedInsertionDoesNotClaimDefiniteFailure() {
+        let failure = DictationFailure(stage: .insertion, reason: .insertionUnconfirmed)
+        XCTAssertEqual(failure.compactTitle, "Einfügung unbestätigt")
+        XCTAssertEqual(failure.title, "Einfügung nicht bestätigt – Textfeld prüfen")
+        XCTAssertNotEqual(failure.title, DictationFailure(stage: .insertion).title)
     }
 
     func testCancellationPresentationWaitsWhenInsertionCommitAlreadyWon() {

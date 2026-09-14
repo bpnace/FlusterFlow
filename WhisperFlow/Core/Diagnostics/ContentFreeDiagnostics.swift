@@ -974,6 +974,7 @@ struct ContentFreeDiagnostics: Sendable {
         latencyMilliseconds: Double,
         sanitizerActionCount: Int = 0
     ) async {
+        logger.info("performance=rewrite outcome=\(outcome.rawValue, privacy: .public) reason=\(reason.rawValue, privacy: .public) duration_ms=\(latencyMilliseconds, privacy: .public)")
         await rewriteRuntime.record(
             rewriter: rewriter,
             outcome: outcome,

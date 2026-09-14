@@ -125,6 +125,36 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         await recognizer.stopRecognitionSession(sessionID: sessionID)
     }
 
+    func testFinalAudioChunkingDoesNotTreatQuietSpeechAsSilence() async throws {
+        let sampleCount = 28 * 16_000
+        var samples: [Float] = (0..<sampleCount).map { index -> Float in
+            let phase = Double(index) * 0.08
+            return Float(sin(phase)) * Float(0.012)
+        }
+        for index in (12 * 16_000)..<Int(12.4 * 16_000) { samples[index] = 0 }
+        let chunks = try await OfflineWhisperKitRuntime.finalAudioChunks(samples)
+        let first = try XCTUnwrap(chunks.first)
+        XCTAssertGreaterThan(first.audioSamples.count, 12 * 16_000)
+        XCTAssertLessThan(first.audioSamples.count, Int(12.4 * 16_000))
+        XCTAssertEqual(chunks.flatMap(\.audioSamples), samples)
+    }
+
+    func testFinalAudioChunkingPreservesEverySampleIncludingShortTail() async throws {
+        let sampleCount = 41 * 16_000 + 123
+        let samples: [Float] = (0..<sampleCount).map { index -> Float in
+            let phase = Double(index) * 0.08
+            return Float(sin(phase)) * Float(0.1)
+        }
+        let chunks = try await OfflineWhisperKitRuntime.finalAudioChunks(samples)
+        XCTAssertGreaterThan(chunks.count, 1)
+        XCTAssertEqual(chunks.flatMap(\.audioSamples), samples)
+        XCTAssertTrue(chunks.allSatisfy { !$0.audioSamples.isEmpty && $0.audioSamples.count <= 20 * 16_000 })
+        let short = Array(samples.prefix(123))
+        let shortChunks = try await OfflineWhisperKitRuntime.finalAudioChunks(short)
+        XCTAssertEqual(shortChunks.count, 1)
+        XCTAssertEqual(shortChunks.first?.audioSamples, short)
+    }
+
     func testFinalWhisperDecodeDoesNotDiscardSubsecondUtterances() {
         let options = OfflineWhisperKitRuntime.decodingOptions(
             language: .german,
@@ -651,6 +681,24 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         )
     }
 
+    func testAdaptivePolicyRequiresUncertaintyForConnectorRunInOtherwiseNormalSentence() {
+        let policy = AdaptiveWhisperKitPolicy()
+        for (confidence, expected) in [(Float(-0.1), false), (Float(-0.5), true)] {
+            let transcript = RawTranscript(
+                text: "Wir sprechen heute darüber, dass es dann bei der Anmeldung funktioniert.",
+                language: .german,
+                avgLogprob: confidence,
+                minWordProbability: 0.95,
+                compressionRatio: 1.0,
+                decoderFallback: RecognitionDecoderFallback.none
+            )
+            let reasons = policy.fallbackReasons(
+                for: transcript, hints: RecognitionHints(language: .german, terms: [])
+            )
+            XCTAssertEqual(reasons.contains(.suspiciousSentenceStructure), expected)
+        }
+    }
+
     func testAdaptivePolicyFallbacksForSuspiciousSentenceStructureEvenWithHighConfidence() {
         let policy = AdaptiveWhisperKitPolicy()
         let transcript = RawTranscript(
@@ -808,6 +856,39 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
                 .backendFailure(.whisperKitLargeV3)
             ) == true
         )
+    }
+
+    func testAdaptiveRecognizerKeepsUsableTurboWhenLargeTimesOut() async throws {
+        let turbo = RecordingSpeechRecognizer(transcript: RawTranscript(
+            text: "usable turbo output", language: .english,
+            backend: .whisperKitLargeV3Turbo, avgLogprob: -0.95
+        ))
+        let recognizer = AdaptiveWhisperKitRecognizer(turbo: turbo, large: DeadlineFailingRecognizer())
+        let result = try await recognizer.transcribe(
+            AudioInput(buffer: AudioBufferHandle(rawValue: 27)),
+            hints: RecognitionHints(language: .english, terms: []),
+            sessionID: DictationSessionID(rawValue: 27)
+        )
+        XCTAssertEqual(result.text, "usable turbo output")
+        XCTAssertEqual(result.backend, .whisperKitLargeV3Turbo)
+        XCTAssertEqual(result.adaptive?.largeFallbackAccepted, false)
+    }
+
+    func testAdaptiveOmissionGuardDoesNotProtectLongRepetitiveTurboOutput() {
+        let policy = AdaptiveWhisperKitPolicy()
+        let clean = "Bitte prüfe morgen meinen Stundenplan und die nächsten Termine."
+        let repeated = clean + String(repeating: " Stundenplan", count: 30)
+        let hints = RecognitionHints(language: .german, terms: [])
+        XCTAssertNil(policy.shouldKeepTurboAfterLargeFallback(
+            turbo: RawTranscript(text: repeated, language: .german),
+            large: RawTranscript(text: clean, language: .german),
+            hints: hints
+        ))
+        XCTAssertEqual(policy.shouldKeepTurboAfterLargeFallback(
+            turbo: RawTranscript(text: clean, language: .german),
+            large: RawTranscript(text: "Bitte prüfe morgen.", language: .german),
+            hints: hints
+        ), .severeOmission)
     }
 
     func testAdaptiveRecognizerKeepsTurboWhenLargeHasWorseQualityAndLexiconMatch() async throws {
@@ -1659,4 +1740,11 @@ private actor FailingSpeechRecognizer: SpeechRecognizing {
     func cancel(sessionID: DictationSessionID) {
         _ = sessionID
     }
+}
+
+private struct DeadlineFailingRecognizer: SpeechRecognizing {
+    func transcribe(_ audio: AudioInput, hints: RecognitionHints, sessionID: DictationSessionID) async throws -> RawTranscript {
+        throw ProductASRDeadlineError.exceeded
+    }
+    func cancel(sessionID: DictationSessionID) async {}
 }
