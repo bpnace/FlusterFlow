@@ -126,7 +126,11 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
     }
 
     func testFinalAudioChunkingDoesNotTreatQuietSpeechAsSilence() async throws {
-        var samples = (0..<(28 * 16_000)).map { Float(sin(Double($0) * 0.08)) * 0.012 }
+        let sampleCount = 28 * 16_000
+        var samples: [Float] = (0..<sampleCount).map { index -> Float in
+            let phase = Double(index) * 0.08
+            return Float(sin(phase)) * Float(0.012)
+        }
         for index in (12 * 16_000)..<Int(12.4 * 16_000) { samples[index] = 0 }
         let chunks = try await OfflineWhisperKitRuntime.finalAudioChunks(samples)
         let first = try XCTUnwrap(chunks.first)
@@ -136,7 +140,11 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
     }
 
     func testFinalAudioChunkingPreservesEverySampleIncludingShortTail() async throws {
-        let samples = (0..<(41 * 16_000 + 123)).map { Float(sin(Double($0) * 0.08)) * 0.1 }
+        let sampleCount = 41 * 16_000 + 123
+        let samples: [Float] = (0..<sampleCount).map { index -> Float in
+            let phase = Double(index) * 0.08
+            return Float(sin(phase)) * Float(0.1)
+        }
         let chunks = try await OfflineWhisperKitRuntime.finalAudioChunks(samples)
         XCTAssertGreaterThan(chunks.count, 1)
         XCTAssertEqual(chunks.flatMap(\.audioSamples), samples)
