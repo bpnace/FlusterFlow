@@ -3,19 +3,6 @@ import Dispatch
 import Foundation
 import SwiftUI
 
-enum RecordingDeadline {
-    static func remainingDuration(
-        recordingStartedAt: Date,
-        now: Date = Date()
-    ) -> TimeInterval {
-        max(
-            0,
-            AVAudioEngineCapture.maximumCaptureDurationSeconds
-                - max(0, now.timeIntervalSince(recordingStartedAt))
-        )
-    }
-}
-
 struct DictationCapabilityStatus: Equatable, Sendable {
     let microphone: PermissionState
     let accessibility: PermissionState
@@ -142,6 +129,7 @@ final class AppEnvironment {
     private let sessionDiagnostics: ContentFreeSessionDiagnostics
     private let fallbackResults: EphemeralResultStore
     private let flowBar = FlowBarController()
+    private let recoveryModel = DictationRecoveryModel()
     private let diagnosticsViewModel: DiagnosticsViewModel
 
     private lazy var appWindow: AppWindowController = {
@@ -161,6 +149,7 @@ final class AppEnvironment {
                 )
             ),
             recordingHistoryViewModel: historyViewModel,
+            recoveryView: AnyView(DictationRecoveryView(model: recoveryModel, store: fallbackResults)),
             settingsView: { [
                 settings,
                 permissions,
@@ -190,7 +179,6 @@ final class AppEnvironment {
     private var pendingReleaseConsent: ConsentSnapshot?
     private var activationReducer: DictationActivationReducer
     private var pendingPushToTalkStopTask: Task<Void, Never>?
-    private var automaticFinalizationTask: Task<Void, Never>?
     private var recordingStartedAt: Date?
     private var isHandsFreeActive = false
     private var isCancellationRequested = false
@@ -214,6 +202,7 @@ final class AppEnvironment {
         hotKey: any PushToTalkHotKeyControlling = CarbonPushToTalkHotKeyController(),
         settings suppliedSettings: SettingsStore? = nil
     ) {
+        let spoolCleanupSucceeded = AudioCaptureSpool.cleanupAbandonedSpools()
         let settings = suppliedSettings ?? SettingsStore()
         activationReducer = DictationActivationReducer(
             mode: settings.handsFreeEnabled ? .doubleTap : .disabled
@@ -326,10 +315,12 @@ final class AppEnvironment {
                 ),
                 .whisperKitLargeV3: whisperLargeRecognizer,
                 .whisperKitLargeV3Turbo: whisperTurboRecognizer
-            ],
-            productASRDeadline: .seconds(30)
+            ]
         )
         let diagnostics = ContentFreeDiagnostics()
+        if !spoolCleanupSucceeded {
+            diagnostics.failure(.temporaryAudioCleanupFailed, stage: .total, sessionID: DictationSessionID(rawValue: 0))
+        }
         let composition = DictationComposition.live(
             settings: settings,
             audioSamples: samples,
@@ -397,7 +388,10 @@ final class AppEnvironment {
         configureMemoryPressureHandling()
         recordingHistorySetupTask = Task { [weak self, coordinator] in
             await coordinator.setRecordingHistoryFailureHandler { [weak self] sessionID in
-                await self?.handleRecordingHistoryCheckpointFailure(sessionID)
+                await self?.handleRecordingHistoryFailure(sessionID)
+            }
+            await coordinator.setAudioCaptureFailureHandler { [weak self] sessionID in
+                await self?.handleAudioCaptureFailure(sessionID)
             }
         }
         permissions.$microphone
@@ -459,13 +453,11 @@ final class AppEnvironment {
         cancellationTask?.cancel()
         largeIdleUnloadTask?.cancel()
         pendingPushToTalkStopTask?.cancel()
-        automaticFinalizationTask?.cancel()
         recordingHistoryPresentationTask?.cancel()
         operationTask = nil
         cancellationTask = nil
         largeIdleUnloadTask = nil
         pendingPushToTalkStopTask = nil
-        automaticFinalizationTask = nil
         recordingHistoryPresentationTask = nil
         memoryPressureSource?.cancel()
         memoryPressureSource = nil
@@ -699,7 +691,6 @@ final class AppEnvironment {
             defer { finishOperationTask() }
             await recordingHistorySetupTask?.value
             await recordingHistoryRecoveryTask.value
-            await fallbackResults.removeAll()
             guard !isCancellationRequested else { return }
             let outcome = await coordinator.start(language: language)
             switch outcome {
@@ -720,8 +711,8 @@ final class AppEnvironment {
                     _ = await coordinator.cancel(sessionID: sessionID)
                     resetActivationState()
                     setCancellationAvailability(false)
-                    diagnostics.failure(.serviceFailure, stage: .audioFinalize, sessionID: sessionID)
-                    showFlow(.error)
+                    diagnostics.failure(.recognizerBusy, stage: .asr, sessionID: sessionID)
+                    showFlow(.failure(DictationFailure(stage: .recognition, reason: .recognizerBusy)))
                     scheduleFlowBarHide(after: .seconds(2))
                     return
                 }
@@ -729,35 +720,10 @@ final class AppEnvironment {
                 await enrichment.register(language: language, for: sessionID)
                 await coordinator.beginIncrementalRecognition(sessionID: sessionID)
                 let prioritizedTerms = personalLexicon.prioritizedDecoderTerms(for: language)
-                let prewarmHints = RecognitionHints(
-                    language: language,
-                    terms: [],
-                    prioritizedLexiconTerms: prioritizedTerms
-                )
-                Task { [speechRecognizer, localRewriter, sessionDiagnostics] in
-                    async let prepareASR: Void = {
-                        let clock = ContinuousClock()
-                        let startedAt = clock.now
-                        let succeeded: Bool
-                        do {
-                            try await speechRecognizer.prepareForRecording(
-                                hints: prewarmHints,
-                                sessionID: sessionID
-                            )
-                            succeeded = true
-                        } catch {
-                            succeeded = false
-                        }
-                        let duration = startedAt.duration(to: clock.now).components
-                        let milliseconds = (Double(duration.seconds) * 1_000)
-                            + (Double(duration.attoseconds) / 1_000_000_000_000_000)
-                        await sessionDiagnostics.recordPrewarm(
-                            succeeded: succeeded,
-                            latencyMilliseconds: milliseconds,
-                            sessionID: sessionID
-                        )
-                    }()
-                    async let prepareRewrite: TextRewritePrewarmResult = localRewriter.prewarm(
+                // Starting incremental recognition already prepares the ASR model.
+                // A second lifecycle call races that preparation and normal stop.
+                Task { [localRewriter] in
+                    _ = await localRewriter.prewarm(
                         TextRewritePrewarmRequest(
                             sessionID: sessionID,
                             language: TextRewriteLanguage(language),
@@ -774,7 +740,6 @@ final class AppEnvironment {
                             """
                         )
                     )
-                    _ = await (prepareASR, prepareRewrite)
                 }
                 guard !isCancellationRequested else {
                     let cancellationOutcome = await coordinator.cancel(sessionID: sessionID)
@@ -784,10 +749,6 @@ final class AppEnvironment {
                 }
                 activeSessionID = sessionID
                 recordingStartedAt = actualRecordingStartedAt
-                scheduleAutomaticFinalization(
-                    for: sessionID,
-                    recordingStartedAt: actualRecordingStartedAt
-                )
                 diagnostics.state(.started, stage: .audioFinalize, sessionID: sessionID)
                 showFlow(.listening)
                 setCancellationAvailability(true)
@@ -809,7 +770,7 @@ final class AppEnvironment {
                 } catch {
                     resetActivationState()
                     setCancellationAvailability(false)
-                    showFlow(.error)
+                    showFlow(.failure(DictationFailure(stage: .recognition, reason: .recognizerBusy)))
                     scheduleFlowBarHide(after: .seconds(2))
                     return
                 }
@@ -831,7 +792,7 @@ final class AppEnvironment {
                 resetActivationState()
                 setCancellationAvailability(false)
                 diagnostics.failure(.serviceFailure, stage: .audioFinalize, sessionID: sessionID)
-                showFlow(failure.stage == .context ? .textFieldRequired : .error)
+                showFlow(.failure(failure))
                 scheduleFlowBarHide(after: .seconds(2))
             }
         }
@@ -861,8 +822,6 @@ final class AppEnvironment {
     ) async {
         pendingPushToTalkStopTask?.cancel()
         pendingPushToTalkStopTask = nil
-        automaticFinalizationTask?.cancel()
-        automaticFinalizationTask = nil
         showFlow(consent.cloudEnabled ? .cloudProcessing : .processing)
         let coordinator = coordinator
         let outcome = await diagnostics.measure(stage: .total, sessionID: sessionID) {
@@ -887,8 +846,7 @@ final class AppEnvironment {
             scheduleFlowBarHide(after: .milliseconds(850))
         case .completed(_, .safeFallback):
             diagnostics.failure(.unconfirmedMutation, stage: .insertion, sessionID: sessionID)
-            _ = await fallbackResults.discard(sessionID: sessionID)
-            showFlow(.error)
+            showFlow(.failure(DictationFailure(stage: .insertion)))
             scheduleFlowBarHide(after: .seconds(2))
         case .noSpeech:
             diagnostics.state(.completed, stage: .audioFinalize, sessionID: sessionID)
@@ -902,11 +860,22 @@ final class AppEnvironment {
                 showFlow(.cancelled)
                 scheduleFlowBarHide(after: .seconds(1))
             }
-        case .failed(let failedSessionID, _):
-            diagnostics.failure(.serviceFailure, stage: .total, sessionID: sessionID)
-            _ = await fallbackResults.discard(sessionID: failedSessionID)
-            showFlow(.error)
+        case .failed(_, let failure):
+            diagnostics.failure(failure.diagnosticCode, stage: failure.stage.diagnosticStage, sessionID: sessionID)
+            showFlow(.failure(failure))
             scheduleFlowBarHide(after: .seconds(2))
+        }
+        if await recoveryModel.handle(outcome, store: fallbackResults) {
+            let presentation: FlowBarPresentation
+            switch outcome {
+            case .failed(_, let failure): presentation = .failure(failure)
+            case .completed(_, .safeFallback): presentation = .failure(DictationFailure(stage: .insertion))
+            default: presentation = .historyWarning
+            }
+            flowBar.show(presentation, openDetails: { [weak self] in
+                self?.appWindow.present(.recordings)
+            })
+            scheduleFlowBarHide(after: .seconds(8))
         }
         scheduleLargeUnloadAfterIdle()
     }
@@ -926,23 +895,6 @@ final class AppEnvironment {
             mode: settings.handsFreeEnabled ? .doubleTap : .disabled
         )
         isHandsFreeActive = false
-    }
-
-    private func scheduleAutomaticFinalization(
-        for sessionID: DictationSessionID,
-        recordingStartedAt: Date
-    ) {
-        automaticFinalizationTask?.cancel()
-        automaticFinalizationTask = Task { @MainActor [weak self] in
-            let remainingDuration = RecordingDeadline.remainingDuration(
-                recordingStartedAt: recordingStartedAt
-            )
-            try? await Task.sleep(for: .seconds(remainingDuration))
-            guard !Task.isCancelled,
-                  let self,
-                  self.activeSessionID == sessionID else { return }
-            self.finishRecordingNow()
-        }
     }
 
     private func applyCancellationOutcome(
@@ -966,9 +918,7 @@ final class AppEnvironment {
             cancelledBeforeSessionStart: cancelledBeforeSessionStart
         ) {
         case .showCancelled:
-            automaticFinalizationTask?.cancel()
-            automaticFinalizationTask = nil
-            pendingPushToTalkStopTask?.cancel()
+                    pendingPushToTalkStopTask?.cancel()
             pendingPushToTalkStopTask = nil
             recordingStartedAt = nil
             isHandsFreeActive = false
@@ -982,18 +932,28 @@ final class AppEnvironment {
         }
     }
 
-    private func handleRecordingHistoryCheckpointFailure(
+    private func handleRecordingHistoryFailure(
         _ sessionID: DictationSessionID
     ) {
-        guard activeSessionID == sessionID, !isCancellationRequested else { return }
-        errorTerminalSessionID = sessionID
-        diagnostics.failure(.serviceFailure, stage: .audioFinalize, sessionID: sessionID)
-        cancelActiveSession()
+        diagnostics.failure(.historyPersistenceFailed, stage: .total, sessionID: sessionID)
+        recoveryModel.reportHistoryFailure()
+    }
+
+    private func handleAudioCaptureFailure(_ sessionID: DictationSessionID) async {
+        let snapshot = await coordinator.snapshot()
+        guard snapshot.activeSessionID == sessionID,
+              snapshot.phase == .listening,
+              !isCancellationRequested else { return }
+        if activeSessionID == sessionID {
+            finishRecordingNow()
+        } else if activeSessionID == nil, operationTask != nil {
+            // Capture may fail while model preparation is still finishing.
+            // The startup path consumes this as soon as it publishes the session.
+            pendingReleaseConsent = settings.consentSnapshot()
+        }
     }
 
     private func presentCancellationError() {
-        automaticFinalizationTask?.cancel()
-        automaticFinalizationTask = nil
         pendingPushToTalkStopTask?.cancel()
         pendingPushToTalkStopTask = nil
         recordingStartedAt = nil
@@ -1024,6 +984,9 @@ final class AppEnvironment {
     }
 
     private func scheduleFlowBarHide(after duration: Duration) {
+        // A replacement presentation owns a new deadline. Older terminal
+        // timers must not hide a recovery notice before its Details can be used.
+        flowGeneration &+= 1
         let generation = flowGeneration
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: duration)
@@ -1078,5 +1041,27 @@ final class AppEnvironment {
         let current = await diagnostics.reportV2()
         let report = diagnosticsBaseline?.merging(current) ?? current
         try? diagnosticsStore.save(report)
+    }
+}
+
+extension DictationFailureStage {
+    var diagnosticStage: DiagnosticStage {
+        switch self {
+        case .context: .total
+        case .audioStart, .audioFinalize: .audioFinalize
+        case .recognition: .asr
+        case .cleanup: .cleanup
+        case .insertion: .insertion
+        }
+    }
+}
+
+extension DictationFailure {
+    var diagnosticCode: DiagnosticErrorCode {
+        switch reason {
+        case .recognizerBusy: .recognizerBusy
+        case .recognitionTimedOut: .recognitionTimedOut
+        case .serviceFailure: .serviceFailure
+        }
     }
 }

@@ -492,7 +492,11 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
             .textFieldRequired,
             .noSpeech,
             .cancelled,
-            .error
+            .error,
+            .failure(DictationFailure(stage: .audioFinalize)),
+            .failure(DictationFailure(stage: .recognition, reason: .recognitionTimedOut)),
+            .failure(DictationFailure(stage: .insertion)),
+            .historyWarning
         ] {
             XCTAssertLessThanOrEqual(FlowBarLayout.visibleWidth(for: presentation), 262)
             XCTAssertEqual(FlowBarLayout.visibleHeight, 44)
@@ -505,9 +509,9 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(RecordingTimerText.remaining(seconds: 15), "noch 00:15")
         XCTAssertEqual(RecordingTimerText.remaining(seconds: -1), "noch 00:00")
         XCTAssertEqual(RecordingTimerText.display(elapsed: 104.999), "01:44")
-        XCTAssertEqual(RecordingTimerText.display(elapsed: 105), "noch 00:15")
-        XCTAssertEqual(RecordingTimerText.display(elapsed: 120), "noch 00:00")
-        XCTAssertEqual(RecordingTimerText.display(elapsed: 121), "noch 00:00")
+        XCTAssertEqual(RecordingTimerText.display(elapsed: 105), "01:45")
+        XCTAssertEqual(RecordingTimerText.display(elapsed: 120), "02:00")
+        XCTAssertEqual(RecordingTimerText.display(elapsed: 121), "02:01")
         XCTAssertEqual(
             RecordingTimerText.accessibilityIdentifier,
             "flow-bar.recording-timer"
@@ -518,16 +522,9 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
         )
         XCTAssertEqual(
             RecordingTimerText.accessibilityValue(elapsed: 110, handsFree: true),
-            "Handsfree aktiv, noch 00:10 verbleibend"
+            "Handsfree aktiv, 01:50 aufgenommen"
         )
-        let startedAt = Date(timeIntervalSince1970: 1_000)
-        XCTAssertEqual(
-            RecordingDeadline.remainingDuration(
-                recordingStartedAt: startedAt,
-                now: startedAt.addingTimeInterval(35)
-            ),
-            85
-        )
+
     }
 
     func testRainbowWaveformGeometryIsBoundedAndChangesOverTime() {

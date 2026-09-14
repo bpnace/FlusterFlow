@@ -21,10 +21,12 @@ actor DictationCoordinator {
     private let recordingHistory: (any RecordingHistoryRecording)?
     private let prioritizedLexiconTerms: @Sendable (DictationLanguage) async -> [String]
     private var recordingHistoryFailureHandler: (@Sendable (DictationSessionID) async -> Void)?
+    private var audioCaptureFailureHandler: (@Sendable (DictationSessionID) async -> Void)?
 
     private var nextSessionRawValue: UInt64 = 0
     private var phase: DictationPhase = .idle
     private var session: DictationSession?
+    private var reportedRecordingHistoryFailureSessions: Set<DictationSessionID> = []
     private var insertionCancellationRequest: InsertionCancellationRequest?
     private var incrementalRecognitionTasks: [DictationSessionID: Task<Void, Never>] = [:]
     private var incrementalRecognitionReceivedAudio: Set<DictationSessionID> = []
@@ -69,6 +71,12 @@ actor DictationCoordinator {
         _ handler: (@Sendable (DictationSessionID) async -> Void)?
     ) {
         recordingHistoryFailureHandler = handler
+    }
+
+    func setAudioCaptureFailureHandler(
+        _ handler: (@Sendable (DictationSessionID) async -> Void)?
+    ) {
+        audioCaptureFailureHandler = handler
     }
 
     func start(language: DictationLanguage = .automatic) async -> StartOutcome {
@@ -123,7 +131,15 @@ actor DictationCoordinator {
         do {
             try await recordingHistory?.begin(sessionID: sessionID, language: language)
         } catch {
-            return await failCurrent(sessionID, at: .audioStart)
+            await reportRecordingHistoryFailure(sessionID)
+            guard isCurrent(sessionID, expected: .listening) else {
+                await finalizeStaleHistorySession(sessionID)
+                return .ignoredStale(sessionID)
+            }
+        }
+        guard isCurrent(sessionID, expected: .listening) else {
+            await finalizeStaleHistorySession(sessionID)
+            return .ignoredStale(sessionID)
         }
         let contextProvider = contextProvider
         contextEnrichmentTasks[sessionID] = Task {
@@ -180,8 +196,8 @@ actor DictationCoordinator {
                         )
                     } catch {
                         await self.reportRecordingHistoryFailure(sessionID)
-                        return
                     }
+                    guard self.isCurrent(sessionID, expected: .listening) else { return }
                     if recognizerAcceptsStreaming {
                         do {
                             let disposition = try await lifecycle.updateRecognitionSession(
@@ -199,6 +215,9 @@ actor DictationCoordinator {
                     }
                 }
             } catch is CancellationError {
+                return
+            } catch is AudioCaptureError {
+                await self.reportAudioCaptureFailure(sessionID)
                 return
             } catch {
                 // Streaming is best effort. Final recognition still receives
@@ -237,7 +256,10 @@ actor DictationCoordinator {
         do {
             try await recordingHistory?.persistAudio(audio, sessionID: sessionID)
         } catch {
-            return await failStop(sessionID, at: .audioFinalize)
+            await reportRecordingHistoryFailure(sessionID)
+            guard isCurrent(sessionID, expected: .transcribing) else {
+                return .ignoredStale(sessionID)
+            }
         }
 
         guard let capturedTargetContext = await resolvedContext(for: sessionID),
@@ -253,6 +275,9 @@ actor DictationCoordinator {
             language: language,
             context: capturedTargetContext.context
         )
+        guard isCurrent(sessionID, expected: .transcribing) else {
+            return .ignoredStale(sessionID)
+        }
 
         let transcript: RawTranscript
         do {
@@ -273,14 +298,36 @@ actor DictationCoordinator {
         } catch let failure as any SpeechRecognitionFailureClassifying
             where failure.indicatesNoSpeech {
             return await finishAsNoSpeech(sessionID)
+        } catch is ProductASRDeadlineError {
+            return await failStop(
+                sessionID,
+                at: .recognition,
+                reason: .recognitionTimedOut
+            )
+        } catch let failure as SessionModelSpeechRecognizerError {
+            if case .recognizerBusy = failure {
+                return await failStop(
+                    sessionID,
+                    at: .recognition,
+                    reason: .recognizerBusy
+                )
+            }
+            return await failStop(sessionID, at: .recognition)
         } catch {
             return await failStop(sessionID, at: .recognition)
         }
 
+        guard isCurrent(sessionID, expected: .transcribing) else {
+            return .ignoredStale(sessionID)
+        }
+        session?.rawTranscript = transcript
         do {
             try await recordingHistory?.persistTranscript(transcript, sessionID: sessionID)
         } catch {
-            return await failStop(sessionID, at: .recognition)
+            await reportRecordingHistoryFailure(sessionID)
+            guard isCurrent(sessionID, expected: .transcribing) else {
+                return .ignoredStale(sessionID)
+            }
         }
 
         await releaseOwnedAudio(for: sessionID)
@@ -288,7 +335,6 @@ actor DictationCoordinator {
         guard isCurrent(sessionID, expected: .transcribing) else {
             return .ignoredStale(sessionID)
         }
-        session?.rawTranscript = transcript
         await fallbackText?.preserveRawTranscript(transcript.text, for: sessionID)
         guard isCurrent(sessionID, expected: .transcribing) else {
             return .ignoredStale(sessionID)
@@ -354,8 +400,25 @@ actor DictationCoordinator {
                 )
             )
         }
+        guard isCurrent(sessionID, expected: .cleaning)
+                || isCurrent(sessionID, expected: .enriching) else {
+            return .ignoredStale(sessionID)
+        }
+        do {
+            try await recordingHistory?.persistFinalTranscript(
+                finalCandidate.text,
+                sessionID: sessionID
+            )
+        } catch {
+            await reportRecordingHistoryFailure(sessionID)
+            guard isCurrent(sessionID, expected: .cleaning)
+                    || isCurrent(sessionID, expected: .enriching) else {
+                return .ignoredStale(sessionID)
+            }
+        }
         await fallbackText?.preserveCandidate(finalCandidate.text, for: sessionID)
-        guard session?.id == sessionID else {
+        guard isCurrent(sessionID, expected: .cleaning)
+                || isCurrent(sessionID, expected: .enriching) else {
             return .ignoredStale(sessionID)
         }
 
@@ -391,6 +454,11 @@ actor DictationCoordinator {
         if insertionOutcome == .confirmedDirect {
             await fallbackText?.confirmInsertion(sessionID: sessionID)
         }
+        do {
+            try await recordingHistory?.complete(sessionID: sessionID)
+        } catch {
+            await reportRecordingHistoryFailure(sessionID)
+        }
         await releaseSessionResources(sessionID)
         if insertionCancellationRequest?.sessionID == sessionID {
             insertionCancellationRequest = nil
@@ -424,10 +492,8 @@ actor DictationCoordinator {
 
             switch await cancellationRequest.task.value {
             case .cancelledBeforeCommit:
-                let historyPreserved = await finalizeCancellationIfActive(sessionID)
-                return historyPreserved
-                    ? .cancelled(sessionID)
-                    : .failed(sessionID, DictationFailure(stage: .audioFinalize))
+                await finalizeCancellationIfActive(sessionID)
+                return .cancelled(sessionID)
             case .tooLateCommitted:
                 return .tooLateCommitted(sessionID)
             }
@@ -439,16 +505,11 @@ actor DictationCoordinator {
         _ = await insertion.requestCancellation(sessionID: sessionID)
         await fallbackText?.discardEphemeralText(sessionID: sessionID)
         await quiesceIncrementalRecognition(sessionID)
-        let historyPreserved = await interruptHistory(sessionID)
-        if !historyPreserved {
-            phase = .error(DictationFailure(stage: .audioFinalize))
-        }
+        await interruptHistory(sessionID)
         await releaseAudio(audio)
         await releaseRemainingSessionResources(sessionID)
 
-        return historyPreserved
-            ? .cancelled(sessionID)
-            : .failed(sessionID, DictationFailure(stage: .audioFinalize))
+        return .cancelled(sessionID)
     }
 
     func resetTerminalState() {
@@ -497,11 +558,7 @@ actor DictationCoordinator {
         phase = .success
         session = nil
         await fallbackText?.discardEphemeralText(sessionID: sessionID)
-        if !(await markHistoryFailed(sessionID)) {
-            phase = .error(DictationFailure(stage: .audioFinalize))
-            await releaseSessionResources(sessionID)
-            return .failed(sessionID, DictationFailure(stage: .audioFinalize))
-        }
+        await markHistoryFailed(sessionID)
         await releaseSessionResources(sessionID)
         return .noSpeech(sessionID)
     }
@@ -511,24 +568,19 @@ actor DictationCoordinator {
         await audioCapture.release(audio)
     }
 
-    @discardableResult
     private func finalizeCancellationIfActive(
         _ sessionID: DictationSessionID
-    ) async -> Bool {
-        guard session?.id == sessionID else { return true }
+    ) async {
+        guard session?.id == sessionID else { return }
 
         let audio = takeOwnedAudio(for: sessionID)
         session = nil
         phase = .cancelled
         await fallbackText?.discardEphemeralText(sessionID: sessionID)
         await quiesceIncrementalRecognition(sessionID)
-        let historyPreserved = await interruptHistory(sessionID)
-        if !historyPreserved {
-            phase = .error(DictationFailure(stage: .audioFinalize))
-        }
+        await interruptHistory(sessionID)
         await releaseAudio(audio)
         await releaseRemainingSessionResources(sessionID)
-        return historyPreserved
     }
 
     private func pendingInsertionCancellationDisposition(
@@ -543,50 +595,59 @@ actor DictationCoordinator {
 
     private func failStop(
         _ sessionID: DictationSessionID,
-        at stage: DictationFailureStage
+        at stage: DictationFailureStage,
+        reason: DictationFailureReason = .serviceFailure
     ) async -> StopOutcome {
         guard session?.id == sessionID else {
             return .ignoredStale(sessionID)
         }
 
-        var failure = DictationFailure(stage: stage)
+        let failure = DictationFailure(stage: stage, reason: reason)
         let audio = takeOwnedAudio(for: sessionID)
         session = nil
-        if !(await markHistoryFailed(sessionID)) {
-            failure = DictationFailure(stage: .audioFinalize)
-        }
+        await markHistoryFailed(sessionID)
         phase = .error(failure)
         await releaseAudio(audio)
         await releaseSessionResources(sessionID)
         return .failed(sessionID, failure)
     }
 
-    private func interruptHistory(_ sessionID: DictationSessionID) async -> Bool {
-        guard let recordingHistory else { return true }
+    private func interruptHistory(_ sessionID: DictationSessionID) async {
+        guard let recordingHistory else { return }
         for attempt in 1...Self.terminalHistoryWriteAttempts {
             do {
                 try await recordingHistory.interrupt(sessionID: sessionID)
-                return true
+                return
             } catch {
-                guard attempt < Self.terminalHistoryWriteAttempts else { return false }
+                await reportRecordingHistoryFailure(sessionID)
+                guard attempt < Self.terminalHistoryWriteAttempts else {
+                    await recordingHistory.releaseTracking(sessionID: sessionID)
+                    return
+                }
                 try? await Task.sleep(for: Self.terminalHistoryWriteRetryDelay)
             }
         }
-        return false
     }
 
-    private func markHistoryFailed(_ sessionID: DictationSessionID) async -> Bool {
-        guard let recordingHistory else { return true }
+    private func markHistoryFailed(_ sessionID: DictationSessionID) async {
+        guard let recordingHistory else { return }
         for attempt in 1...Self.terminalHistoryWriteAttempts {
             do {
                 try await recordingHistory.markFailed(sessionID: sessionID)
-                return true
+                return
             } catch {
-                guard attempt < Self.terminalHistoryWriteAttempts else { return false }
+                await reportRecordingHistoryFailure(sessionID)
+                guard attempt < Self.terminalHistoryWriteAttempts else {
+                    await recordingHistory.releaseTracking(sessionID: sessionID)
+                    return
+                }
                 try? await Task.sleep(for: Self.terminalHistoryWriteRetryDelay)
             }
         }
-        return false
+    }
+
+    private func finalizeStaleHistorySession(_ sessionID: DictationSessionID) async {
+        await interruptHistory(sessionID)
     }
 
     private func releaseSessionResources(_ sessionID: DictationSessionID) async {
@@ -668,8 +729,16 @@ actor DictationCoordinator {
     }
 
     private func reportRecordingHistoryFailure(_ sessionID: DictationSessionID) async {
-        guard isCurrent(sessionID, expected: .listening) else { return }
+        guard recordingHistory != nil,
+              reportedRecordingHistoryFailureSessions.insert(sessionID).inserted else {
+            return
+        }
         await recordingHistoryFailureHandler?(sessionID)
+    }
+
+    private func reportAudioCaptureFailure(_ sessionID: DictationSessionID) async {
+        guard isCurrent(sessionID, expected: .listening) else { return }
+        await audioCaptureFailureHandler?(sessionID)
     }
 
     private func shouldAttemptTranscription(_ audio: AudioInput) -> Bool {

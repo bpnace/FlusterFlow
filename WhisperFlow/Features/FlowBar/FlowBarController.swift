@@ -11,6 +11,8 @@ enum FlowBarPresentation: Equatable, Sendable {
     case noSpeech
     case cancelled
     case error
+    case failure(DictationFailure)
+    case historyWarning
 
     var title: String {
         switch self {
@@ -22,7 +24,9 @@ enum FlowBarPresentation: Equatable, Sendable {
         case .textFieldRequired: "Textfeld auswählen"
         case .noSpeech: "Keine Sprache erkannt"
         case .cancelled: "Abgebrochen"
-        case .error: "Nicht verfügbar"
+        case .error: "Diktat fehlgeschlagen"
+        case .failure(let failure): failure.title
+        case .historyWarning: "Verlauf nicht gespeichert"
         }
     }
 
@@ -35,7 +39,7 @@ enum FlowBarPresentation: Equatable, Sendable {
         case .textFieldRequired: "character.cursor.ibeam"
         case .noSpeech: "mic.slash"
         case .cancelled: "xmark"
-        case .error: "exclamationmark.triangle"
+        case .error, .failure, .historyWarning: "exclamationmark.triangle"
         }
     }
 
@@ -46,7 +50,8 @@ enum FlowBarPresentation: Equatable, Sendable {
         case .textFieldRequired: .orange
         case .noSpeech: .orange
         case .cancelled: .secondary
-        case .error: .red
+        case .error, .failure: .red
+        case .historyWarning: .orange
         case .priming, .processing, .cloudProcessing: .cyan
         }
     }
@@ -55,7 +60,7 @@ enum FlowBarPresentation: Equatable, Sendable {
         switch self {
         case .priming, .listening, .processing, .cloudProcessing:
             true
-        case .inserted, .textFieldRequired, .noSpeech, .cancelled, .error:
+        case .inserted, .textFieldRequired, .noSpeech, .cancelled, .error, .failure, .historyWarning:
             false
         }
     }
@@ -70,7 +75,9 @@ enum FlowBarPresentation: Equatable, Sendable {
         case .textFieldRequired: "Textfeld fehlt"
         case .noSpeech: "Keine Sprache"
         case .cancelled: "Abgebrochen"
-        case .error: "Nicht verfügbar"
+        case .error: "Diktat fehlgeschlagen"
+        case .failure(let failure): failure.compactTitle
+        case .historyWarning: "Verlauf nicht gespeichert"
         }
     }
 
@@ -78,7 +85,7 @@ enum FlowBarPresentation: Equatable, Sendable {
         switch self {
         case .priming, .listening, .processing, .cloudProcessing:
             true
-        case .inserted, .textFieldRequired, .noSpeech, .cancelled, .error:
+        case .inserted, .textFieldRequired, .noSpeech, .cancelled, .error, .failure, .historyWarning:
             false
         }
     }
@@ -88,7 +95,7 @@ enum FlowBarPresentation: Equatable, Sendable {
         case .listening: 1
         case .priming: 0.72
         case .processing, .cloudProcessing: 0.5
-        case .inserted, .textFieldRequired, .noSpeech, .cancelled, .error: 0
+        case .inserted, .textFieldRequired, .noSpeech, .cancelled, .error, .failure, .historyWarning: 0
         }
     }
 }
@@ -113,6 +120,8 @@ enum FlowBarLayout {
             148
         case .textFieldRequired, .noSpeech, .error:
             178
+        case .failure, .historyWarning:
+            262
         }
     }
 
@@ -164,15 +173,11 @@ enum RecordingTimerText {
     }
 
     static func display(elapsed seconds: TimeInterval) -> String {
-        seconds >= 105
-            ? remaining(seconds: 120 - seconds)
-            : elapsed(seconds: seconds)
+        elapsed(seconds: seconds)
     }
 
     static func accessibilityValue(elapsed seconds: TimeInterval, handsFree: Bool) -> String {
-        let time = seconds >= 105
-            ? "\(display(elapsed: seconds)) verbleibend"
-            : "\(display(elapsed: seconds)) aufgenommen"
+        let time = "\(display(elapsed: seconds)) aufgenommen"
         return handsFree ? "Handsfree aktiv, \(time)" : time
     }
 
@@ -225,7 +230,8 @@ final class FlowBarController {
         _ presentation: FlowBarPresentation,
         recordingStartedAt: Date? = nil,
         handsFree: Bool = false,
-        cancel: (() -> Void)? = nil
+        cancel: (() -> Void)? = nil,
+        openDetails: (() -> Void)? = nil
     ) {
         let cancelAction = presentation.supportsCancellation ? cancel : nil
         let windowSize = FlowBarLayout.windowSize(for: presentation)
@@ -234,7 +240,8 @@ final class FlowBarController {
             presentation: presentation,
             recordingStartedAt: recordingStartedAt,
             handsFree: handsFree,
-            cancel: cancelAction
+            cancel: cancelAction,
+            openDetails: openDetails
         )
         positionPanel()
         panel.orderFrontRegardless()
@@ -274,6 +281,7 @@ struct FlowBarView: View {
     var recordingStartedAt: Date? = nil
     var handsFree = false
     let cancel: (() -> Void)?
+    var openDetails: (() -> Void)? = nil
     var animationEnabled = true
 
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
@@ -282,6 +290,17 @@ struct FlowBarView: View {
     var body: some View {
         HStack(spacing: 10) {
             statusContent
+
+            if let openDetails {
+                Button(action: openDetails) {
+                    Image(systemName: "arrow.up.forward.square")
+                        .foregroundStyle(.white.opacity(0.92))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Diktatdetails und Wiederherstellung öffnen")
+                .help("Details und Text öffnen")
+            }
 
             if let cancel {
                 Capsule()
@@ -363,7 +382,7 @@ struct FlowBarView: View {
                 if let elapsed {
                     Text(RecordingTimerText.display(elapsed: elapsed))
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(elapsed >= 105 ? .orange : .white.opacity(0.72))
+                        .foregroundStyle(.white.opacity(0.72))
                         .monospacedDigit()
                 }
 

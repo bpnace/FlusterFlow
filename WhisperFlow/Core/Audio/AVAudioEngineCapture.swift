@@ -9,6 +9,8 @@ enum AudioCaptureError: Error, Equatable, Sendable {
     case captureNotActive
     case inputUnavailable
     case deviceConfigurationChanged
+    case captureBufferOverflow
+    case audioStorageFailed
     case maximumDurationExceeded
     case normalizationFailed
 }
@@ -29,18 +31,29 @@ struct SystemMicrophoneAuthorization: MicrophoneAuthorizing {
 }
 
 actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
+    // Kept for source compatibility with the bounded utility below. Live
+    // capture deliberately has no duration cap; its storage is file-backed.
     static let maximumCaptureDurationSeconds: TimeInterval = 120
+    static let realtimeQueueCapacitySeconds: TimeInterval = 2
+    static let maximumStreamingBatchDurationSeconds: TimeInterval = 2
 
     private let store: AudioBufferStore
     private let authorization: any MicrophoneAuthorizing
     private let notificationCenter: NotificationCenter
 
     private var engine: AVAudioEngine?
-    private var accumulator: RealtimeCaptureBuffer?
-    private var completedAccumulators: [RealtimeCaptureBuffer] = []
+    private var spool: AudioCaptureSpool?
+    private var activeQueue: RealtimeAudioFrameQueue?
+    private var activeWriter: Task<Void, Never>?
     private var activeSessionID: DictationSessionID?
+    private var nextGeneration: UInt64 = 0
+    private var activeGeneration: UInt64?
+    private var segmentDrainTask: Task<AudioCaptureSpoolError?, Never>?
+    private var segmentDrainGeneration: UInt64?
     private var configurationObserver: (any NSObjectProtocol)?
     private var terminalError: AudioCaptureError?
+    private var isFinalizing = false
+    private var cancellationRequestedGeneration: UInt64?
     private var tapInstalled = false
     private var isRecoveringConfiguration = false
 
@@ -55,15 +68,53 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
     }
 
     func startCapture(for sessionID: DictationSessionID) async throws {
-        guard activeSessionID == nil else {
+        guard activeSessionID == nil, segmentDrainTask == nil else {
             throw AudioCaptureError.captureAlreadyActive
         }
-        guard await authorization.authorizationStatus() == .authorized else {
-            throw AudioCaptureError.microphonePermissionDenied
-        }
-        try activateEngine(for: sessionID)
+        nextGeneration &+= 1
+        let generation = nextGeneration
         activeSessionID = sessionID
+        activeGeneration = generation
         terminalError = nil
+        isFinalizing = false
+        cancellationRequestedGeneration = nil
+        var sessionSpool: AudioCaptureSpool?
+        do {
+            let authorized = await authorization.authorizationStatus() == .authorized
+            guard isCurrentSession(sessionID, generation: generation) else {
+                throw AudioCaptureError.captureNotActive
+            }
+            guard authorized else {
+                throw AudioCaptureError.microphonePermissionDenied
+            }
+            let createdSpool = try AudioCaptureSpool()
+            sessionSpool = createdSpool
+            spool = createdSpool
+            try await activateEngine(
+                for: sessionID,
+                generation: generation
+            )
+            guard isCurrentSession(sessionID, generation: generation) else {
+                throw AudioCaptureError.captureNotActive
+            }
+            terminalError = nil
+        } catch let error as AudioCaptureError {
+            if isCurrentSession(sessionID, generation: generation) {
+                try? sessionSpool?.discard()
+                clearSession()
+            } else {
+                try? sessionSpool?.discard()
+            }
+            throw error
+        } catch {
+            if isCurrentSession(sessionID, generation: generation) {
+                try? sessionSpool?.discard()
+                clearSession()
+            } else {
+                try? sessionSpool?.discard()
+            }
+            throw mapSpoolError(error)
+        }
     }
 
     func finishCapture(for sessionID: DictationSessionID) async throws -> AudioInput {
@@ -71,22 +122,39 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
             throw AudioCaptureError.captureNotActive
         }
 
-        stopEngine()
+        guard let generation = activeGeneration else {
+            throw AudioCaptureError.captureNotActive
+        }
+        isFinalizing = true
+        let sessionSpool = spool
+        await stopCurrentSegment()
+        guard isCurrentSession(sessionID, generation: generation),
+              cancellationRequestedGeneration != generation else {
+            try? sessionSpool?.discard()
+            throw AudioCaptureError.captureNotActive
+        }
         removeConfigurationObserver()
-        defer { clearSession() }
+        defer {
+            try? sessionSpool?.discard()
+            if isCurrentSession(sessionID, generation: generation),
+               cancellationRequestedGeneration != generation {
+                clearSession()
+            }
+        }
 
         do {
-            let snapshot = aggregateSnapshot()
-            if let finalizationError = Self.finalizationError(
-                for: snapshot,
-                terminalError: terminalError
-            ) {
-                throw finalizationError
+            if let terminalError { throw terminalError }
+            guard let sessionSpool else {
+                throw AudioCaptureError.audioStorageFailed
             }
-            let normalized = try PCMNormalizer.normalize(snapshot.chunks)
+            let normalized = try PCMNormalizer.normalize(
+                sessionSpool.readAllChunks()
+            )
             return await store.store(normalized)
         } catch let error as AudioCaptureError {
             throw error
+        } catch let error as AudioCaptureSpoolError {
+            throw mapSpoolError(error)
         } catch {
             throw AudioCaptureError.normalizationFailed
         }
@@ -96,33 +164,52 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         for sessionID: DictationSessionID,
         afterFrameOffset frameOffset: Int
     ) async throws -> IncrementalAudioBatch? {
-        guard activeSessionID == sessionID, let accumulator else {
+        guard activeSessionID == sessionID, let spool else {
             return nil
         }
-        let completedFrameOffset = completedCapturedFrameCount()
-        let localFrameOffset = max(0, frameOffset - completedFrameOffset)
-        guard let snapshot = accumulator.incrementalSnapshot(
-            afterFrameOffset: localFrameOffset,
-            minimumDurationSeconds: 0.5
-        ) else {
-            return nil
+        if let terminalError { throw terminalError }
+        if let queueFailure = activeQueue?.failure {
+            throw mapQueueFailure(queueFailure)
         }
-        let chunk = try PCMNormalizer.prepareStreamingChunk(
-            CapturedAudioChunk(
-                monoSamples: snapshot.monoSamples,
-                sampleRate: snapshot.sampleRate
+        let batch: AudioSpoolBatch?
+        do {
+            batch = try spool.readBatch(
+                afterFrameOffset: frameOffset,
+                minimumDurationSeconds: 0.5,
+                maximumDurationSeconds: Self.maximumStreamingBatchDurationSeconds
             )
-        )
-        guard !chunk.samples.isEmpty else { return nil }
+        } catch let error as AudioCaptureSpoolError {
+            throw mapSpoolError(error)
+        }
+        guard let batch else { return nil }
+        var samples: [Float] = []
+        samples.reserveCapacity(batch.frameCount)
+        var sampleRate = AudioSamples.recognizerSampleRate
+        for rawChunk in batch.chunks {
+            let chunk = try PCMNormalizer.prepareStreamingChunk(rawChunk)
+            sampleRate = chunk.sampleRate
+            samples.append(contentsOf: chunk.samples)
+        }
+        guard !samples.isEmpty else { return nil }
         return IncrementalAudioBatch(
-            chunk: chunk,
-            nextFrameOffset: completedFrameOffset + snapshot.nextFrameOffset
+            chunk: RecognitionAudioChunk(
+                samples: samples,
+                sampleRate: sampleRate,
+                channelCount: 1
+            ),
+            nextFrameOffset: batch.nextFrameOffset
         )
     }
 
     func cancelCapture(for sessionID: DictationSessionID) async {
-        guard activeSessionID == sessionID else { return }
-        stopEngine()
+        guard activeSessionID == sessionID,
+              let generation = activeGeneration else { return }
+        cancellationRequestedGeneration = generation
+        let sessionSpool = spool
+        await stopCurrentSegment()
+        guard isCurrentSession(sessionID, generation: generation) else { return }
+        removeConfigurationObserver()
+        try? sessionSpool?.discard()
         clearSession()
     }
 
@@ -130,65 +217,124 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         await store.release(input)
     }
 
-    private func recoverFromConfigurationChange(for sessionID: DictationSessionID) async {
-        guard activeSessionID == sessionID, !isRecoveringConfiguration else {
+    private func recoverFromConfigurationChange(
+        for sessionID: DictationSessionID,
+        generation: UInt64
+    ) async {
+        guard isCurrentSession(sessionID, generation: generation),
+              !isFinalizing,
+              cancellationRequestedGeneration != generation,
+              !isRecoveringConfiguration else {
             return
         }
         isRecoveringConfiguration = true
-        defer { isRecoveringConfiguration = false }
+        defer {
+            if isCurrentSession(sessionID, generation: generation) {
+                isRecoveringConfiguration = false
+            }
+        }
 
-        preserveCurrentAccumulator()
-        stopEngine()
+        await stopCurrentSegment()
+        guard isCurrentSession(sessionID, generation: generation),
+              !isFinalizing,
+              cancellationRequestedGeneration != generation else {
+            return
+        }
         removeConfigurationObserver()
         engine = nil
 
+        if terminalError == .deviceConfigurationChanged {
+            terminalError = nil
+        }
+        guard terminalError == nil else { return }
         do {
-            try activateEngine(for: sessionID)
+            try await activateEngine(
+                for: sessionID,
+                generation: generation
+            )
+            guard isCurrentSession(sessionID, generation: generation),
+                  !isFinalizing,
+                  cancellationRequestedGeneration != generation else {
+                return
+            }
             terminalError = nil
         } catch let error as AudioCaptureError {
-            terminalError = error
+            if isCurrentSession(sessionID, generation: generation) {
+                terminalError = error
+            }
         } catch {
-            terminalError = .inputUnavailable
+            if isCurrentSession(sessionID, generation: generation) {
+                terminalError = mapSpoolError(error)
+            }
         }
     }
 
-    private func activateEngine(for sessionID: DictationSessionID) throws {
-        let engine = AVAudioEngine()
-        let remainingDuration = remainingCaptureDurationSeconds()
-        guard remainingDuration > 0 else {
-            throw AudioCaptureError.maximumDurationExceeded
+    private func activateEngine(for sessionID: DictationSessionID) async throws {
+        guard let generation = activeGeneration else {
+            throw AudioCaptureError.captureNotActive
         }
+        try await activateEngine(for: sessionID, generation: generation)
+    }
 
+    private func activateEngine(
+        for sessionID: DictationSessionID,
+        generation: UInt64
+    ) async throws {
+        guard isCurrentSession(sessionID, generation: generation),
+              !isFinalizing,
+              cancellationRequestedGeneration != generation else {
+            throw AudioCaptureError.captureNotActive
+        }
+        let engine = AVAudioEngine()
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw AudioCaptureError.inputUnavailable
         }
-        guard let accumulator = RealtimeCaptureBuffer(
+        guard activeQueue == nil,
+              activeWriter == nil,
+              let spool,
+              let queue = RealtimeAudioFrameQueue(
             sampleRate: inputFormat.sampleRate,
             channelCount: Int(inputFormat.channelCount),
-            maximumDurationSeconds: remainingDuration
+            capacitySeconds: Self.realtimeQueueCapacitySeconds
         ) else {
-            throw AudioCaptureError.inputUnavailable
+            throw AudioCaptureError.audioStorageFailed
         }
+        try spool.startSegment(sampleRate: inputFormat.sampleRate)
+        let writer = spool.startWriter(for: queue)
 
         input.installTap(onBus: 0, bufferSize: 512, format: inputFormat) { buffer, _ in
-            _ = accumulator.append(buffer)
+            _ = queue.append(buffer)
         }
         do {
             engine.prepare()
             try engine.start()
         } catch {
-            accumulator.seal()
             input.removeTap(onBus: 0)
+            queue.seal()
+            await writer.value
+            spool.endSegment()
             if engine.isRunning {
                 engine.stop()
             }
             throw AudioCaptureError.inputUnavailable
         }
 
+        guard isCurrentSession(sessionID, generation: generation) else {
+            input.removeTap(onBus: 0)
+            queue.seal()
+            await writer.value
+            spool.endSegment()
+            if engine.isRunning {
+                engine.stop()
+            }
+            throw AudioCaptureError.captureNotActive
+        }
+
         self.engine = engine
-        self.accumulator = accumulator
+        activeQueue = queue
+        activeWriter = writer
         tapInstalled = true
         configurationObserver = notificationCenter.addObserver(
             forName: .AVAudioEngineConfigurationChange,
@@ -197,28 +343,90 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         ) { [weak self] _ in
             Task {
                 try? await Task.sleep(for: .milliseconds(100))
-                await self?.recoverFromConfigurationChange(for: sessionID)
+                await self?.recoverFromConfigurationChange(
+                    for: sessionID,
+                    generation: generation
+                )
             }
         }
     }
 
-    private func stopEngine() {
-        guard let engine else { return }
-        accumulator?.seal()
-        if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-            tapInstalled = false
-        }
-        if engine.isRunning {
-            engine.stop()
-        }
-    }
+    private func stopCurrentSegment() async {
+        let generation = activeGeneration
 
-    private func preserveCurrentAccumulator() {
-        guard let accumulator else { return }
-        accumulator.seal()
-        completedAccumulators.append(accumulator)
-        self.accumulator = nil
+        if let drainTask = segmentDrainTask {
+            let failure = await drainTask.value
+            if let segmentDrainGeneration,
+               segmentDrainGeneration == generation,
+               isCurrentGeneration(segmentDrainGeneration) {
+                if let failure {
+                    terminalError = mapSpoolError(failure)
+                }
+            }
+            return
+        }
+
+        // Take ownership of the current segment before the first await. A
+        // concurrent cancel/finish can then await the same drain task without
+        // clearing a newer session's engine or queue on resumption.
+        let ownedQueue = activeQueue
+        let ownedWriter = activeWriter
+        let ownedSpool = spool
+
+        if let engine {
+            if tapInstalled {
+                // Remove the tap before stopping the engine, then seal the
+                // queue to close the race with an already-running callback.
+                engine.inputNode.removeTap(onBus: 0)
+                tapInstalled = false
+            }
+            activeQueue?.seal()
+            if engine.isRunning {
+                engine.stop()
+            }
+        } else {
+            activeQueue?.seal()
+        }
+
+        // Clear published segment references before awaiting disk drain. Any
+        // later segment belongs to a different generation and cannot be
+        // overwritten by this stop operation.
+        self.engine = nil
+        activeQueue = nil
+        activeWriter = nil
+        tapInstalled = false
+
+        guard let queue = ownedQueue,
+              let writer = ownedWriter,
+              let ownedSpool else {
+            return
+        }
+
+        let drainTask: Task<AudioCaptureSpoolError?, Never> = Task.detached(
+            priority: .utility
+        ) {
+            do {
+                try await ownedSpool.drain(queue: queue, writer: writer)
+                return nil
+            } catch let error as AudioCaptureSpoolError {
+                return error
+            } catch {
+                return AudioCaptureSpoolError.writeFailed
+            }
+        }
+        segmentDrainTask = drainTask
+        segmentDrainGeneration = generation
+        let failure = await drainTask.value
+        ownedSpool.endSegment()
+        if segmentDrainGeneration == generation {
+            segmentDrainTask = nil
+            segmentDrainGeneration = nil
+        }
+        if let generation,
+           isCurrentGeneration(generation),
+           let failure {
+            terminalError = mapSpoolError(failure)
+        }
     }
 
     private func removeConfigurationObserver() {
@@ -226,25 +434,6 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
             notificationCenter.removeObserver(configurationObserver)
         }
         configurationObserver = nil
-    }
-
-    private func aggregateSnapshot() -> RealtimeCaptureBuffer.Snapshot {
-        let snapshots = (completedAccumulators + [accumulator].compactMap { $0 })
-            .map { $0.snapshot() }
-        let chunks = snapshots.flatMap(\.chunks)
-        let failures = snapshots.compactMap(\.failure)
-        let failure = failures.first { $0 != .formatChanged }
-            ?? (chunks.isEmpty && failures.contains(.formatChanged) ? .formatChanged : nil)
-        return RealtimeCaptureBuffer.Snapshot(
-            chunks: chunks,
-            maximumDurationExceeded: snapshots.contains(where: \.maximumDurationExceeded),
-            // A format change is expected when macOS moves the system input.
-            // The closed segment stays valid and the new engine continues on
-            // the new format, so this must not become a terminal session error.
-            failure: failure,
-            capturedFrameCount: snapshots.reduce(0) { $0 + $1.capturedFrameCount },
-            capacity: snapshots.reduce(0) { $0 + $1.capacity }
-        )
     }
 
     nonisolated static func finalizationError(
@@ -271,34 +460,63 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         return terminalError
     }
 
-    private func remainingCaptureDurationSeconds() -> TimeInterval {
-        Self.maximumCaptureDurationSeconds - completedCaptureDurationSeconds()
+    nonisolated static func finalizationError(
+        for spoolFailure: AudioCaptureSpoolError?,
+        terminalError: AudioCaptureError?
+    ) -> AudioCaptureError? {
+        if let terminalError { return terminalError }
+        switch spoolFailure {
+        case .queueOverflow: return .captureBufferOverflow
+        case .formatChanged: return .deviceConfigurationChanged
+        case .writeFailed, .readFailed, .corruptFile, .invalidConfiguration,
+             .cannotCreateFile:
+            return .audioStorageFailed
+        case nil: return nil
+        }
     }
 
-    private func completedCaptureDurationSeconds() -> TimeInterval {
-        completedAccumulators
-            .map { $0.snapshot() }
-            .flatMap(\.chunks)
-            .reduce(0) { duration, chunk in
-                duration + (Double(chunk.monoSamples.count) / chunk.sampleRate)
-            }
+    private func mapSpoolError(_ error: Error) -> AudioCaptureError {
+        guard let spoolError = error as? AudioCaptureSpoolError else {
+            return .audioStorageFailed
+        }
+        return Self.finalizationError(for: spoolError, terminalError: nil)
+            ?? .audioStorageFailed
     }
 
-    private func completedCapturedFrameCount() -> Int {
-        completedAccumulators
-            .map { $0.snapshot() }
-            .reduce(0) { $0 + $1.capturedFrameCount }
+    private func mapQueueFailure(
+        _ failure: RealtimeAudioFrameQueue.Failure
+    ) -> AudioCaptureError {
+        switch failure {
+        case .overflow: return .captureBufferOverflow
+        case .storageFailed, .unsupportedBuffer: return .audioStorageFailed
+        case .formatChanged: return .deviceConfigurationChanged
+        }
     }
 
     private func clearSession() {
         removeConfigurationObserver()
         engine = nil
-        accumulator = nil
-        completedAccumulators.removeAll(keepingCapacity: false)
+        spool = nil
+        activeQueue = nil
+        activeWriter = nil
         activeSessionID = nil
+        activeGeneration = nil
         terminalError = nil
+        isFinalizing = false
+        cancellationRequestedGeneration = nil
         tapInstalled = false
         isRecoveringConfiguration = false
+    }
+
+    private func isCurrentSession(
+        _ sessionID: DictationSessionID,
+        generation: UInt64
+    ) -> Bool {
+        activeSessionID == sessionID && activeGeneration == generation
+    }
+
+    private func isCurrentGeneration(_ generation: UInt64) -> Bool {
+        activeGeneration == generation
     }
 
 }

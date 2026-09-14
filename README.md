@@ -17,7 +17,7 @@
 
 FlusterFlow ist eine native macOS-Menüleisten-App für schnelles Diktieren in nativen Apps, Browsern und Electron-Anwendungen. Die Spracherkennung läuft standardmäßig vollständig lokal. Aufnahmen und Transkriptversionen bleiben wiederherstellbar auf dem eigenen Mac; eine textbasierte Cloud-Überarbeitung ist ein getrennt aktivierbarer BYOK-Pfad.
 
-> **Status:** Version 0.4.0 ist derzeit als Release Candidate dokumentiert. Der unterstützte Daily-Driver-Weg ist ein lokal signierter Build aus dem Quellcode; Mikrofon, globaler Hotkey, Accessibility-Einfügung und TCC-Kontinuität bleiben manuelle Release-Gates.
+> **Status:** Version 0.4.1 ist als Patch für zuverlässigere Diktate dokumentiert. Der unterstützte Daily-Driver-Weg ist ein lokal signierter Build aus dem Quellcode; Mikrofon, globaler Hotkey, Accessibility-Einfügung und TCC-Kontinuität bleiben manuelle Release-Gates.
 
 ## Highlights
 
@@ -72,7 +72,9 @@ macOS bindet Bedienungshilfen-Berechtigungen an die Code-Identität der App. Bui
 
 Setze den Cursor in ein editierbares Textfeld, halte das ausgewählte Kürzel gedrückt, sprich und lasse es wieder los. FlusterFlow transkribiert und bereinigt den Text und erfasst unmittelbar vor der Einfügung das aktuell fokussierte Ziel erneut.
 
-Ist Handsfree aktiviert, startet ein Doppeltipp auf das Kürzel die Aufnahme; ein weiterer Tastendruck beendet sie. Nach spätestens 120 Sekunden finalisiert FlusterFlow die bis dahin erfasste Aufnahme automatisch.
+Ist Handsfree aktiviert, startet ein Doppeltipp auf das Kürzel die Aufnahme; ein weiterer Tastendruck beendet sie. Auch längere Diktate laufen bis zum manuellen Beenden weiter. Die Zeitanzeige zeigt die bisherige Aufnahmedauer.
+
+Der Verlauf enthält den erkannten Rohtext und das fertig korrigierte Ergebnis. Schlägt das Einfügen fehl, führt der Details-Knopf in der Flow Bar zum erhaltenen Text. Kopieren erfolgt nur auf ausdrücklichen Klick. Ein Fehler beim Speichern des Verlaufs wird gesondert angezeigt und unterbricht die Textverarbeitung nicht.
 
 Die Aufnahmehistorie speichert Audio, Status und Transkriptversionen lokal bis zur ausdrücklichen Löschung. Eine Aufnahme kann dort mit einem anderen lokalen Modell erneut transkribiert werden – ohne Cloud-Aufruf, Kontextlesung oder automatische Einfügung.
 
@@ -154,6 +156,7 @@ Die isolierten AppKit-, WKWebView-, Accessibility- und Privacy-Harnesses sind un
 - [Model Supply Chain](docs/model-supply-chain.md)
 - [Verification Harnesses](docs/verification-harnesses.md)
 - [Architecture Decision Records](docs/adr)
+- [Release Notes 0.4.1](docs/release-v0.4.1.md)
 - [Release Notes 0.4.0](docs/release-v0.4.0.md)
 - [Beitragsrichtlinien](CONTRIBUTING.md)
 - [Sicherheitsrichtlinie](SECURITY.md)

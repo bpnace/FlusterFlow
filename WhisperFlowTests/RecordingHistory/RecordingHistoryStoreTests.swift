@@ -3,6 +3,45 @@ import XCTest
 @testable import WhisperFlow
 
 final class RecordingHistoryStoreTests: XCTestCase {
+    func testTranscriptVersionKindRoundTripsAndLegacyManifestsDecodeAsRaw() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let raw = TranscriptVersion(
+            backend: "whisper",
+            language: .german,
+            createdAt: Date(timeIntervalSince1970: 10),
+            text: "Roh",
+            kind: .raw
+        )
+        let final = TranscriptVersion(
+            backend: "rewriter",
+            language: .german,
+            createdAt: Date(timeIntervalSince1970: 11),
+            text: "Final",
+            kind: .final
+        )
+        let encoded = try JSONEncoder.iso8601.encode([raw, final])
+        let decoded = try decoder.decode(
+            [TranscriptVersion].self,
+            from: encoded
+        )
+
+        XCTAssertEqual(decoded.map(\.kind), [.raw, .final])
+
+        var legacyObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder.iso8601.encode(raw))
+                as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "kind")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let legacy = try decoder.decode(
+            TranscriptVersion.self,
+            from: legacyData
+        )
+
+        XCTAssertEqual(legacy.kind, .raw)
+    }
+
     func testRoundTripAndNewestFirst() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -120,7 +159,7 @@ final class RecordingHistoryStoreTests: XCTestCase {
             sessionID: sessionID
         )
         entries = try await store.list()
-        XCTAssertEqual(entries.first?.durationSeconds ?? 0, 0.5, accuracy: 0.001)
+        XCTAssertEqual(entries.first?.durationSeconds ?? 0, 1.0, accuracy: 0.001)
 
         try await recorder.persistCheckpoint(
             RecognitionAudioChunk(samples: Array(repeating: 0.1, count: 72_000)),
@@ -130,6 +169,44 @@ final class RecordingHistoryStoreTests: XCTestCase {
         XCTAssertEqual(entries.first?.state, .recording)
         XCTAssertEqual(entries.first?.hasAudio, true)
         XCTAssertEqual(entries.first?.durationSeconds ?? 0, 5.5, accuracy: 0.001)
+    }
+
+    func testRecorderKeepsSessionMappingUntilCompleteAndPersistsRawAndFinalVersions() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = RecordingHistoryStore(rootURL: root)
+        let sampleStore = AudioBufferStore()
+        let recorder = RecordingHistoryRecorder(store: store, sampleAccess: sampleStore)
+        let sessionID = DictationSessionID(rawValue: 43)
+        let input = await sampleStore.store(AudioSamples(values: [0.1, -0.1]))
+        try await recorder.begin(sessionID: sessionID, language: .german)
+        try await recorder.persistAudio(input, sessionID: sessionID)
+        try await recorder.persistTranscript(
+            RawTranscript(
+                text: "Roh",
+                language: .german,
+                backend: .whisperKitLargeV3
+            ),
+            sessionID: sessionID
+        )
+        try await recorder.persistFinalTranscript("Final", sessionID: sessionID)
+
+        let entriesAfterTranscript = try await store.list()
+        let entry = try XCTUnwrap(entriesAfterTranscript.first)
+        XCTAssertEqual(entry.state, .transcribing)
+        XCTAssertEqual(entry.transcripts.map(\.kind), [.raw, .final])
+        XCTAssertEqual(entry.transcripts.map(\.text), ["Roh", "Final"])
+
+        try await recorder.complete(sessionID: sessionID)
+        let entriesAfterComplete = try await store.list()
+        let completedEntry = try XCTUnwrap(entriesAfterComplete.first)
+        XCTAssertEqual(completedEntry.state, .completed)
+        do {
+            try await recorder.persistFinalTranscript("Nachlauf", sessionID: sessionID)
+            XCTFail("Expected the completed recorder session mapping to be released")
+        } catch let error as RecordingHistoryError {
+            XCTAssertEqual(error, .missingRecording)
+        }
     }
 
     func testDeleteRemovesAudioAndManifest() async throws {
@@ -651,6 +728,14 @@ private extension JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return encoder
+    }
+}
+
+private extension JSONDecoder {
+    static var iso8601: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
     }
 }
 

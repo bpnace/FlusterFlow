@@ -9,25 +9,65 @@ enum RecordingHistoryState: String, Codable, Sendable {
     case interrupted
 }
 
+enum TranscriptVersionKind: String, Codable, Equatable, Sendable {
+    case raw
+    case final
+    case retranscribed
+}
+
 struct TranscriptVersion: Codable, Equatable, Sendable {
+    typealias Kind = TranscriptVersionKind
+
     let version: Int
     let backend: String
     let language: DictationLanguage
     let createdAt: Date
     let text: String
+    let kind: TranscriptVersionKind
 
     init(
         version: Int = 0,
         backend: String,
         language: DictationLanguage,
         createdAt: Date = .now,
-        text: String
+        text: String,
+        kind: TranscriptVersionKind = .raw
     ) {
         self.version = version
         self.backend = backend
         self.language = language
         self.createdAt = createdAt
         self.text = text
+        self.kind = kind
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case backend
+        case language
+        case createdAt
+        case text
+        case kind
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        backend = try container.decode(String.self, forKey: .backend)
+        language = try container.decode(DictationLanguage.self, forKey: .language)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        text = try container.decode(String.self, forKey: .text)
+        kind = try container.decodeIfPresent(TranscriptVersionKind.self, forKey: .kind) ?? .raw
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(backend, forKey: .backend)
+        try container.encode(language, forKey: .language)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(text, forKey: .text)
+        try container.encode(kind, forKey: .kind)
     }
 }
 
@@ -103,6 +143,12 @@ struct RecordingHistoryEntry: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+extension RecordingHistoryEntry {
+    var preferredTranscript: TranscriptVersion? {
+        transcripts.last(where: { $0.kind != .raw }) ?? transcripts.last
+    }
+}
+
 enum RecordingHistoryError: Error, Equatable, Sendable {
     case missingRecording
     case missingAudio
@@ -117,6 +163,9 @@ actor RecordingHistoryStore {
     static let audioFormatVersion = 1
 
     private static let audioMagic = Data("FFL1".utf8)
+    private static let checkpointMagic = Data("FFC1".utf8)
+    private static let checkpointRecordMarker: UInt32 = 0x314B4843
+    private static let checkpointRecordHeaderSize = 4 + 4 + 2 + 2 + 8
     private let rootURL: URL
     private let fileManager: FileManager
     private let writeData: (@Sendable (Data, URL) throws -> Void)?
@@ -190,8 +239,8 @@ actor RecordingHistoryStore {
         let manifests = contents.filter { $0.pathExtension == "json" }
         let manifestIDs = Set(manifests.compactMap(managedArtifactID))
         missingAudioEntryIDs.formIntersection(manifestIDs)
-        let orphanAudioDetected = contents.contains { url in
-            url.pathExtension == "audio"
+        let orphanManagedAssetDetected = contents.contains { url in
+            (url.pathExtension == "audio" || url.pathExtension == "checkpoint")
                 && managedArtifactID(url).map { !manifestIDs.contains($0) } == true
         }
         var entries: [RecordingHistoryEntry] = []
@@ -217,7 +266,9 @@ actor RecordingHistoryStore {
                 foundCorruptManifest = true
             }
         }
-        corruptManifestDetected = foundCorruptManifest || orphanAudioDetected || foundMissingAudio
+        corruptManifestDetected = foundCorruptManifest
+            || orphanManagedAssetDetected
+            || foundMissingAudio
         return entries.sorted { $0.createdAt > $1.createdAt }
     }
 
@@ -233,6 +284,45 @@ actor RecordingHistoryStore {
         var entry = try entry(id)
         entry.state = state
         try write(entry)
+    }
+
+    func appendCheckpoint(
+        _ chunk: RecognitionAudioChunk,
+        for id: UUID,
+        state: RecordingHistoryState = .recording
+    ) throws {
+        guard !chunk.samples.isEmpty,
+              chunk.sampleRate > 0,
+              chunk.sampleRate <= Int(UInt32.max),
+              chunk.channelCount > 0,
+              chunk.channelCount <= Int(UInt16.max),
+              chunk.samples.count <= Int.max / MemoryLayout<UInt32>.size else {
+            throw RecordingHistoryError.emptyAudio
+        }
+        var entry = try entry(id)
+        var record = Data(capacity: Self.checkpointRecordHeaderSize + chunk.samples.count * 4)
+        append(Self.checkpointRecordMarker, to: &record)
+        append(UInt32(chunk.sampleRate), to: &record)
+        append(UInt16(chunk.channelCount), to: &record)
+        append(UInt16(0), to: &record)
+        append(UInt64(chunk.samples.count), to: &record)
+        for value in chunk.samples {
+            append(value.bitPattern, to: &record)
+        }
+        try appendCheckpointData(record, for: id)
+
+        entry.hasAudio = true
+        entry.audioFormatVersion = Self.audioFormatVersion
+        entry.durationSeconds = (entry.durationSeconds ?? 0)
+            + Double(chunk.samples.count) / Double(chunk.sampleRate)
+        entry.state = state
+        try write(entry)
+    }
+
+    func discardCheckpoint(for id: UUID) throws {
+        let url = checkpointURL(id)
+        guard fileManager.fileExists(atPath: url.path) else { return }
+        try deleteItem(at: url)
     }
 
     func saveAudio(
@@ -262,12 +352,26 @@ actor RecordingHistoryStore {
 
     func loadAudio(for id: UUID) throws -> AudioSamples {
         _ = try entry(id)
-        let data: Data
-        do {
-            data = try Data(contentsOf: audioURL(id))
-        } catch {
-            throw RecordingHistoryError.missingAudio
+        if fileManager.fileExists(atPath: audioURL(id).path) {
+            let data: Data
+            do {
+                data = try Data(contentsOf: audioURL(id))
+            } catch {
+                throw RecordingHistoryError.missingAudio
+            }
+            do {
+                return try decodeFinalAudio(data)
+            } catch {
+                if hasUsableCheckpointAsset(for: id) {
+                    return try decodeCheckpointAudio(for: id)
+                }
+                throw error
+            }
         }
+        return try decodeCheckpointAudio(for: id)
+    }
+
+    private func decodeFinalAudio(_ data: Data) throws -> AudioSamples {
         guard data.starts(with: Self.audioMagic) else {
             throw RecordingHistoryError.corruptAudio
         }
@@ -300,7 +404,73 @@ actor RecordingHistoryStore {
         )
     }
 
-    func appendTranscript(_ transcript: TranscriptVersion, to id: UUID) throws {
+    private func decodeCheckpointAudio(for id: UUID) throws -> AudioSamples {
+        let data: Data
+        do {
+            data = try Data(contentsOf: checkpointURL(id))
+        } catch {
+            throw RecordingHistoryError.missingAudio
+        }
+        guard data.starts(with: Self.checkpointMagic) else {
+            throw RecordingHistoryError.corruptAudio
+        }
+
+        var offset = Self.checkpointMagic.count
+        var values: [Float] = []
+        var sampleRate: Int?
+        var channelCount: Int?
+        while offset < data.count {
+            guard data.count - offset >= Self.checkpointRecordHeaderSize else {
+                break
+            }
+            guard let marker = read(UInt32.self, from: data, offset: &offset),
+                  marker == Self.checkpointRecordMarker,
+                  let rawSampleRate = read(UInt32.self, from: data, offset: &offset),
+                  rawSampleRate > 0,
+                  let rawChannelCount = read(UInt16.self, from: data, offset: &offset),
+                  rawChannelCount > 0,
+                  read(UInt16.self, from: data, offset: &offset) != nil,
+                  let rawCount = read(UInt64.self, from: data, offset: &offset),
+                  rawCount > 0,
+                  rawCount <= UInt64(Int.max) else {
+                throw RecordingHistoryError.corruptAudio
+            }
+            let count = Int(rawCount)
+            let byteCount = count.multipliedReportingOverflow(by: MemoryLayout<UInt32>.size)
+            guard !byteCount.overflow,
+                  byteCount.partialValue <= data.count - offset else {
+                // A process crash can leave a partial final record. Keep the
+                // complete prefix and let the terminal path persist it.
+                break
+            }
+            let currentSampleRate = Int(rawSampleRate)
+            let currentChannelCount = Int(rawChannelCount)
+            if sampleRate == nil {
+                sampleRate = currentSampleRate
+                channelCount = currentChannelCount
+            }
+            for _ in 0..<count {
+                guard let bits = read(UInt32.self, from: data, offset: &offset) else {
+                    throw RecordingHistoryError.corruptAudio
+                }
+                values.append(Float(bitPattern: bits))
+            }
+        }
+        guard let sampleRate, let channelCount, !values.isEmpty else {
+            throw RecordingHistoryError.missingAudio
+        }
+        return AudioSamples(
+            values: values,
+            sampleRate: sampleRate,
+            channelCount: channelCount
+        )
+    }
+
+    func appendTranscript(
+        _ transcript: TranscriptVersion,
+        to id: UUID,
+        state: RecordingHistoryState? = nil
+    ) throws {
         var entry = try entry(id)
         entry.transcripts.append(
             TranscriptVersion(
@@ -308,10 +478,15 @@ actor RecordingHistoryStore {
                 backend: transcript.backend,
                 language: transcript.language,
                 createdAt: transcript.createdAt,
-                text: transcript.text
+                text: transcript.text,
+                kind: transcript.kind
             )
         )
-        entry.state = .completed
+        if let state {
+            entry.state = state
+        } else if transcript.kind != .raw || entry.state != .transcribing {
+            entry.state = .completed
+        }
         try write(entry)
     }
 
@@ -402,7 +577,7 @@ actor RecordingHistoryStore {
     }
 
     func delete(_ id: UUID) throws {
-        let urls = [audioURL(id), manifestURL(id)]
+        let urls = [audioURL(id), checkpointURL(id), manifestURL(id)]
         guard urls.contains(where: { fileManager.fileExists(atPath: $0.path) }) else {
             throw RecordingHistoryError.missingRecording
         }
@@ -417,7 +592,7 @@ actor RecordingHistoryStore {
     }
 
     func discardActive(_ id: UUID) throws {
-        let urls = [audioURL(id), manifestURL(id)]
+        let urls = [audioURL(id), checkpointURL(id), manifestURL(id)]
         guard urls.contains(where: { fileManager.fileExists(atPath: $0.path) }) else {
             return
         }
@@ -438,16 +613,19 @@ actor RecordingHistoryStore {
 
     private func deleteManagedArtifacts(for id: UUID) -> Bool {
         var failed = false
-        let audio = audioURL(id)
-        if fileManager.fileExists(atPath: audio.path) {
+        for url in [audioURL(id), checkpointURL(id)] {
+            guard fileManager.fileExists(atPath: url.path) else { continue }
             do {
-                try deleteItem(at: audio)
+                try deleteItem(at: url)
             } catch {
                 failed = true
             }
         }
-        guard !fileManager.fileExists(atPath: audio.path) else { return true }
-
+        guard !failed,
+              !fileManager.fileExists(atPath: audioURL(id).path),
+              !fileManager.fileExists(atPath: checkpointURL(id).path) else {
+            return true
+        }
         let manifest = manifestURL(id)
         if fileManager.fileExists(atPath: manifest.path) {
             do {
@@ -495,7 +673,9 @@ actor RecordingHistoryStore {
     }
 
     private func managedArtifactID(_ url: URL) -> UUID? {
-        guard url.pathExtension == "json" || url.pathExtension == "audio" else {
+        guard url.pathExtension == "json"
+                || url.pathExtension == "audio"
+                || url.pathExtension == "checkpoint" else {
             return nil
         }
         return UUID(uuidString: url.deletingPathExtension().lastPathComponent)
@@ -526,6 +706,10 @@ actor RecordingHistoryStore {
     }
 
     private func hasUsableAudioAsset(for id: UUID) -> Bool {
+        hasUsableFinalAudioAsset(for: id) || hasUsableCheckpointAsset(for: id)
+    }
+
+    private func hasUsableFinalAudioAsset(for id: UUID) -> Bool {
         let url = audioURL(id)
         guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
               let fileSize = (attributes[.size] as? NSNumber)?.uint64Value,
@@ -554,6 +738,39 @@ actor RecordingHistoryStore {
         let expectedSize = UInt64(header.count)
             + count * UInt64(MemoryLayout<UInt32>.size)
         return fileSize == expectedSize
+    }
+
+    private func hasUsableCheckpointAsset(for id: UUID) -> Bool {
+        let url = checkpointURL(id)
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let fileSize = (attributes[.size] as? NSNumber)?.uint64Value,
+              fileSize >= UInt64(Self.checkpointMagic.count + Self.checkpointRecordHeaderSize + 4),
+              let handle = try? FileHandle(forReadingFrom: url) else {
+            return false
+        }
+        defer { try? handle.close() }
+        guard let header = try? handle.read(
+            upToCount: Self.checkpointMagic.count + Self.checkpointRecordHeaderSize
+        ),
+              header.count == Self.checkpointMagic.count + Self.checkpointRecordHeaderSize,
+              header.starts(with: Self.checkpointMagic) else {
+            return false
+        }
+        var offset = Self.checkpointMagic.count
+        guard let marker = read(UInt32.self, from: header, offset: &offset),
+              marker == Self.checkpointRecordMarker,
+              let sampleRate = read(UInt32.self, from: header, offset: &offset),
+              sampleRate > 0,
+              let channels = read(UInt16.self, from: header, offset: &offset),
+              channels > 0,
+              read(UInt16.self, from: header, offset: &offset) != nil,
+              let count = read(UInt64.self, from: header, offset: &offset),
+              count > 0,
+              count <= UInt64(Int.max / MemoryLayout<UInt32>.size) else {
+            return false
+        }
+        let payloadBytes = count * UInt64(MemoryLayout<UInt32>.size)
+        return payloadBytes <= fileSize - UInt64(header.count)
     }
 
     private func entry(_ id: UUID) throws -> RecordingHistoryEntry {
@@ -585,6 +802,43 @@ actor RecordingHistoryStore {
 
     private func audioURL(_ id: UUID) -> URL {
         rootURL.appendingPathComponent(id.uuidString).appendingPathExtension("audio")
+    }
+
+    private func checkpointURL(_ id: UUID) -> URL {
+        rootURL.appendingPathComponent(id.uuidString).appendingPathExtension("checkpoint")
+    }
+
+    private func appendCheckpointData(_ record: Data, for id: UUID) throws {
+        try ensureRoot()
+        let url = checkpointURL(id)
+        guard !fileManager.fileExists(atPath: url.path) else {
+            if writeData != nil {
+                let existing = try Data(contentsOf: url)
+                guard existing.starts(with: Self.checkpointMagic) else {
+                    throw RecordingHistoryError.corruptAudio
+                }
+                try atomicWrite(existing + record, to: url)
+                return
+            }
+
+            let headerHandle = try FileHandle(forReadingFrom: url)
+            let header = try headerHandle.read(upToCount: Self.checkpointMagic.count)
+            try headerHandle.close()
+            guard header == Self.checkpointMagic else {
+                throw RecordingHistoryError.corruptAudio
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: record)
+            handle.synchronizeFile()
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+            return
+        }
+        try atomicWrite(Self.checkpointMagic + record, to: url)
     }
 
     private func write(_ entry: RecordingHistoryEntry) throws {
@@ -626,18 +880,29 @@ protocol RecordingHistoryRecording: Sendable {
     func persistCheckpoint(_ chunk: RecognitionAudioChunk, sessionID: DictationSessionID) async throws
     func persistAudio(_ input: AudioInput, sessionID: DictationSessionID) async throws
     func persistTranscript(_ transcript: RawTranscript, sessionID: DictationSessionID) async throws
+    func persistFinalTranscript(_ text: String, sessionID: DictationSessionID) async throws
+    func complete(sessionID: DictationSessionID) async throws
     func markFailed(sessionID: DictationSessionID) async throws
     func interrupt(sessionID: DictationSessionID) async throws
+    func releaseTracking(sessionID: DictationSessionID) async
+}
+
+extension RecordingHistoryRecording {
+    func persistFinalTranscript(_ text: String, sessionID: DictationSessionID) async throws {}
+    func complete(sessionID: DictationSessionID) async throws {}
+    func releaseTracking(sessionID: DictationSessionID) async {}
 }
 
 actor RecordingHistoryRecorder: RecordingHistoryRecording {
     private let store: RecordingHistoryStore
     private let sampleAccess: any AudioSampleAccessing
     private var entries: [DictationSessionID: UUID] = [:]
-    private var checkpointSamples: [DictationSessionID: [Float]] = [:]
-    private var lastCheckpointFrameCounts: [DictationSessionID: Int] = [:]
-    private var checkpointFormats: [DictationSessionID: (sampleRate: Int, channelCount: Int)] = [:]
     private var pendingFinalSamples: [DictationSessionID: AudioSamples] = [:]
+    private var transcriptMetadata: [
+        DictationSessionID: (backend: String, language: DictationLanguage)
+    ] = [:]
+    private var beginningSessions: Set<DictationSessionID> = []
+    private var invalidatedBeginningSessions: Set<DictationSessionID> = []
 
     init(store: RecordingHistoryStore, sampleAccess: any AudioSampleAccessing) {
         self.store = store
@@ -645,12 +910,23 @@ actor RecordingHistoryRecorder: RecordingHistoryRecording {
     }
 
     func begin(sessionID: DictationSessionID, language: DictationLanguage) async throws {
-        let entry = try await store.create(language: language)
+        beginningSessions.insert(sessionID)
+        let entry: RecordingHistoryEntry
+        do {
+            entry = try await store.create(language: language)
+        } catch {
+            beginningSessions.remove(sessionID)
+            invalidatedBeginningSessions.remove(sessionID)
+            throw error
+        }
+        beginningSessions.remove(sessionID)
+        if invalidatedBeginningSessions.remove(sessionID) != nil {
+            try await store.discardActive(entry.id)
+            return
+        }
         entries[sessionID] = entry.id
-        checkpointSamples[sessionID] = []
-        lastCheckpointFrameCounts[sessionID] = 0
-        checkpointFormats[sessionID] = nil
         pendingFinalSamples[sessionID] = nil
+        transcriptMetadata[sessionID] = (backend: "unknown", language: language)
     }
 
     func persistCheckpoint(
@@ -658,22 +934,8 @@ actor RecordingHistoryRecorder: RecordingHistoryRecording {
         sessionID: DictationSessionID
     ) async throws {
         guard let id = entries[sessionID], !chunk.samples.isEmpty else { return }
-        checkpointSamples[sessionID, default: []].append(contentsOf: chunk.samples)
-        checkpointFormats[sessionID] = (chunk.sampleRate, chunk.channelCount)
-        let lastCheckpointFrameCount = lastCheckpointFrameCounts[sessionID, default: 0]
-        guard let samples = checkpointSamples[sessionID],
-              lastCheckpointFrameCount == 0
-                || samples.count - lastCheckpointFrameCount >= chunk.sampleRate * 5 else { return }
-        try await store.saveAudio(
-            AudioSamples(
-                values: samples,
-                sampleRate: chunk.sampleRate,
-                channelCount: chunk.channelCount
-            ),
-            for: id,
-            state: .recording
-        )
-        lastCheckpointFrameCounts[sessionID] = samples.count
+        try await store.appendCheckpoint(chunk, for: id, state: .recording)
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
     }
 
     func persistAudio(_ input: AudioInput, sessionID: DictationSessionID) async throws {
@@ -681,27 +943,33 @@ actor RecordingHistoryRecorder: RecordingHistoryRecording {
             throw RecordingHistoryError.missingRecording
         }
         let samples = try await sampleAccess.samples(for: input)
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
         guard !samples.values.isEmpty else {
-            if let checkpoint = checkpointSamples[sessionID],
-               !checkpoint.isEmpty,
-               let format = checkpointFormats[sessionID] {
-                let recovered = AudioSamples(
-                    values: checkpoint,
-                    sampleRate: format.sampleRate,
-                    channelCount: format.channelCount
-                )
+            if let recovered = try? await store.loadAudio(for: id) {
+                guard entries[sessionID] == id else {
+                    throw RecordingHistoryError.missingRecording
+                }
                 pendingFinalSamples[sessionID] = recovered
                 try await store.saveAudio(recovered, for: id, state: .transcribing)
+                guard entries[sessionID] == id else {
+                    throw RecordingHistoryError.missingRecording
+                }
+                try await store.discardCheckpoint(for: id)
+                guard entries[sessionID] == id else {
+                    throw RecordingHistoryError.missingRecording
+                }
                 clearBufferedAudio(for: sessionID)
                 return
             }
             try await store.discardActive(id)
-            entries[sessionID] = nil
-            clearBufferedAudio(for: sessionID)
+            clearSession(for: sessionID)
             return
         }
         pendingFinalSamples[sessionID] = samples
         try await store.saveAudio(samples, for: id, state: .transcribing)
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
+        try await store.discardCheckpoint(for: id)
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
         clearBufferedAudio(for: sessionID)
     }
 
@@ -709,77 +977,114 @@ actor RecordingHistoryRecorder: RecordingHistoryRecording {
         guard let id = entries[sessionID] else {
             throw RecordingHistoryError.missingRecording
         }
-        do {
-            try await store.appendTranscript(
-                TranscriptVersion(
-                    backend: transcript.backend?.rawValue ?? "unknown",
-                    language: transcript.language,
-                    text: transcript.text
-                ),
-                to: id
-            )
-            entries[sessionID] = nil
-            clearBufferedAudio(for: sessionID)
-        } catch let transcriptError {
-            do {
-                try await store.mark(id, state: .failed)
-            } catch let stateError {
-                throw stateError
-            }
-            throw transcriptError
+        transcriptMetadata[sessionID] = (
+            backend: transcript.backend?.rawValue ?? "unknown",
+            language: transcript.language
+        )
+        try await store.appendTranscript(
+            TranscriptVersion(
+                backend: transcript.backend?.rawValue ?? "unknown",
+                language: transcript.language,
+                text: transcript.text,
+                kind: .raw
+            ),
+            to: id,
+            state: .transcribing
+        )
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
+    }
+
+    func persistFinalTranscript(_ text: String, sessionID: DictationSessionID) async throws {
+        guard let id = entries[sessionID] else {
+            throw RecordingHistoryError.missingRecording
         }
+        let metadata = transcriptMetadata[sessionID]
+            ?? (backend: "unknown", language: .automatic)
+        try await store.appendTranscript(
+            TranscriptVersion(
+                backend: metadata.backend,
+                language: metadata.language,
+                text: text,
+                kind: .final
+            ),
+            to: id,
+            state: .transcribing
+        )
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
+    }
+
+    func complete(sessionID: DictationSessionID) async throws {
+        if beginningSessions.contains(sessionID) {
+            invalidatedBeginningSessions.insert(sessionID)
+            return
+        }
+        guard let id = entries[sessionID] else { return }
+        defer { clearSession(for: sessionID) }
+        try await store.mark(id, state: .completed)
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
+        try await store.discardCheckpoint(for: id)
+    }
+
+    func releaseTracking(sessionID: DictationSessionID) async {
+        if beginningSessions.contains(sessionID) {
+            invalidatedBeginningSessions.insert(sessionID)
+            return
+        }
+        invalidatedBeginningSessions.remove(sessionID)
+        clearSession(for: sessionID)
     }
 
     func markFailed(sessionID: DictationSessionID) async throws {
+        if beginningSessions.contains(sessionID) {
+            invalidatedBeginningSessions.insert(sessionID)
+            return
+        }
         guard let id = entries[sessionID] else { return }
         if let samples = pendingFinalSamples[sessionID] {
             try await store.saveAudio(samples, for: id, state: .failed)
-        } else if let samples = checkpointSamples[sessionID],
-                  !samples.isEmpty,
-                  let format = checkpointFormats[sessionID] {
-            try await store.saveAudio(
-                AudioSamples(
-                    values: samples,
-                    sampleRate: format.sampleRate,
-                    channelCount: format.channelCount
-                ),
-                for: id,
-                state: .failed
-            )
+        } else if let samples = try? await store.loadAudio(for: id) {
+            guard entries[sessionID] == id else {
+                throw RecordingHistoryError.missingRecording
+            }
+            try await store.saveAudio(samples, for: id, state: .failed)
         } else {
             try await store.mark(id, state: .failed)
         }
-        entries[sessionID] = nil
-        clearBufferedAudio(for: sessionID)
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
+        try await store.discardCheckpoint(for: id)
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
+        clearSession(for: sessionID)
     }
 
     func interrupt(sessionID: DictationSessionID) async throws {
+        if beginningSessions.contains(sessionID) {
+            invalidatedBeginningSessions.insert(sessionID)
+            return
+        }
         guard let id = entries[sessionID] else { return }
         if let samples = pendingFinalSamples[sessionID] {
             try await store.saveAudio(samples, for: id, state: .interrupted)
-        } else if let samples = checkpointSamples[sessionID],
-                  !samples.isEmpty,
-                  let format = checkpointFormats[sessionID] {
-            try await store.saveAudio(
-                AudioSamples(
-                    values: samples,
-                    sampleRate: format.sampleRate,
-                    channelCount: format.channelCount
-                ),
-                for: id,
-                state: .interrupted
-            )
+        } else if let samples = try? await store.loadAudio(for: id) {
+            guard entries[sessionID] == id else {
+                throw RecordingHistoryError.missingRecording
+            }
+            try await store.saveAudio(samples, for: id, state: .interrupted)
         } else {
             try await store.interruptOrDiscardEmpty(id)
         }
-        entries[sessionID] = nil
-        clearBufferedAudio(for: sessionID)
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
+        try await store.discardCheckpoint(for: id)
+        guard entries[sessionID] == id else { throw RecordingHistoryError.missingRecording }
+        clearSession(for: sessionID)
     }
 
     private func clearBufferedAudio(for sessionID: DictationSessionID) {
-        checkpointSamples[sessionID] = nil
-        lastCheckpointFrameCounts[sessionID] = nil
-        checkpointFormats[sessionID] = nil
         pendingFinalSamples[sessionID] = nil
+    }
+
+    private func clearSession(for sessionID: DictationSessionID) {
+        entries[sessionID] = nil
+        transcriptMetadata[sessionID] = nil
+        clearBufferedAudio(for: sessionID)
     }
 }

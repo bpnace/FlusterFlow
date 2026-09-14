@@ -40,9 +40,49 @@ enum DictationFailureStage: Equatable, Sendable {
     case insertion
 }
 
+enum DictationFailureReason: Equatable, Sendable {
+    case serviceFailure
+    case recognitionTimedOut
+    case recognizerBusy
+}
+
 struct DictationFailure: Equatable, Sendable {
     let stage: DictationFailureStage
+    var reason: DictationFailureReason = .serviceFailure
+
+    var compactTitle: String {
+        switch reason {
+        case .recognitionTimedOut: return "Erkennung dauert zu lange"
+        case .recognizerBusy: return "Erkennung beschäftigt"
+        case .serviceFailure: break
+        }
+        switch stage {
+        case .context: return "Textfeld auswählen"
+        case .audioStart: return "Mikrofonfehler"
+        case .audioFinalize: return "Audiofehler"
+        case .recognition: return "Erkennung fehlgeschlagen"
+        case .cleanup: return "Korrektur fehlgeschlagen"
+        case .insertion: return "Einfügen fehlgeschlagen"
+        }
+    }
+
+    var title: String {
+        switch reason {
+        case .recognitionTimedOut: return "Spracherkennung dauert zu lange"
+        case .recognizerBusy: return "Spracherkennung noch beschäftigt"
+        case .serviceFailure: break
+        }
+        switch stage {
+        case .context: return "Textfeld auswählen"
+        case .audioStart: return "Mikrofonaufnahme fehlgeschlagen"
+        case .audioFinalize: return "Audio konnte nicht verarbeitet werden"
+        case .recognition: return "Spracherkennung fehlgeschlagen"
+        case .cleanup: return "Textkorrektur fehlgeschlagen"
+        case .insertion: return "Einfügen fehlgeschlagen"
+        }
+    }
 }
+
 
 struct DictationSnapshot: Equatable, Sendable {
     let phase: DictationPhase

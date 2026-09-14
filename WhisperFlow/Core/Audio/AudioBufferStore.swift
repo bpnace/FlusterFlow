@@ -99,6 +99,9 @@ protocol AudioSampleAccessing: Sendable {
 }
 
 actor AudioBufferStore: AudioSampleAccessing {
+    // This is the final ASR materialization boundary. Live capture remains
+    // file-backed until AVAudioEngineCapture calls store; recognizers that
+    // request AudioSamples still receive the existing array-based contract.
     private var buffers: [AudioBufferHandle: AudioSamples] = [:]
     private var nextHandleValue: UInt64 = 0
 

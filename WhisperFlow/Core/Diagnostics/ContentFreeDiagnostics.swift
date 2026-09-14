@@ -25,6 +25,10 @@ enum DiagnosticErrorCode: String, Codable, Sendable {
     case staleSession
     case deviceChanged
     case serviceFailure
+    case historyPersistenceFailed
+    case recognizerBusy
+    case recognitionTimedOut
+    case temporaryAudioCleanupFailed
     case unconfirmedMutation
 }
 
