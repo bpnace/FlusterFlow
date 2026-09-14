@@ -4,6 +4,15 @@ import XCTest
 @testable import WhisperFlow
 
 final class AccessibilityAndInsertionTests: XCTestCase, @unchecked Sendable {
+    func testValueReadbackConfirmsExactUTF16RangeAndCaret() {
+        XCTAssertTrue(AXInsertionRangeVerifier.confirms(value: "🙂 Text Ende", insertedText: "Text", location: 3, selectionLocation: 7, selectionLength: 0))
+        XCTAssertFalse(AXInsertionRangeVerifier.confirms(value: "Text anders", insertedText: "Text", location: 3, selectionLocation: 7, selectionLength: 0))
+        XCTAssertFalse(AXInsertionRangeVerifier.confirms(value: "Text", insertedText: "Text", location: 0, selectionLocation: 0, selectionLength: 0))
+        XCTAssertFalse(AXInsertionRangeVerifier.confirms(value: "Text", insertedText: "Text", location: 0, selectionLocation: 4, selectionLength: 1))
+        XCTAssertFalse(AXInsertionRangeVerifier.confirms(value: "Tex", insertedText: "Text", location: 0, selectionLocation: 4, selectionLength: 0))
+        XCTAssertFalse(AXInsertionRangeVerifier.confirms(value: "Text", insertedText: "Text", location: Int.max, selectionLocation: 4, selectionLength: 0))
+    }
+
     func testContextOffDoesNotReadFocusedElementText() async throws {
         let sessionID = DictationSessionID(rawValue: 1)
         let target = makeTarget(sessionID: sessionID)

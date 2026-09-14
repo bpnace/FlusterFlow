@@ -230,20 +230,38 @@ final class FlowBarController {
         _ presentation: FlowBarPresentation,
         recordingStartedAt: Date? = nil,
         handsFree: Bool = false,
+        recordingAction: (() -> Void)? = nil,
         cancel: (() -> Void)? = nil,
         openDetails: (() -> Void)? = nil
     ) {
         let cancelAction = presentation.supportsCancellation ? cancel : nil
         let windowSize = FlowBarLayout.windowSize(for: presentation)
-        panel.setContentSize(windowSize)
+        let shouldAnimate = panel.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        var targetFrame = panel.frame
+        targetFrame.size = windowSize
+        if let visibleFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame {
+            targetFrame.origin = NSPoint(
+                x: visibleFrame.midX - windowSize.width / 2,
+                y: visibleFrame.minY + 64
+            )
+        }
         hostingView.rootView = FlowBarView(
             presentation: presentation,
             recordingStartedAt: recordingStartedAt,
             handsFree: handsFree,
+            recordingAction: presentation == .listening ? recordingAction : nil,
             cancel: cancelAction,
             openDetails: openDetails
         )
-        positionPanel()
+        if shouldAnimate {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.22
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(targetFrame, display: true)
+            }
+        } else {
+            panel.setFrame(targetFrame, display: true)
+        }
         panel.orderFrontRegardless()
     }
 
@@ -280,16 +298,34 @@ struct FlowBarView: View {
     let presentation: FlowBarPresentation
     var recordingStartedAt: Date? = nil
     var handsFree = false
+    var recordingAction: (() -> Void)? = nil
     let cancel: (() -> Void)?
     var openDetails: (() -> Void)? = nil
     var animationEnabled = true
 
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         HStack(spacing: 10) {
             statusContent
+
+            if presentation == .listening, let recordingAction {
+                Button(action: recordingAction) {
+                    Image(systemName: handsFree ? "checkmark" : "hand.raised.fill")
+                        .contentTransition(.symbolEffect(.replace))
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: handsFree)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.black)
+                        .frame(width: 26, height: 26)
+                        .background(.white, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("flow-bar.recording-action")
+                .accessibilityLabel(handsFree ? "Diktat beenden und einfügen" : "Zu Handsfree wechseln")
+                .help(handsFree ? "Beenden, verarbeiten und einfügen" : "Ohne gedrücktes Kürzel weitersprechen")
+            }
 
             if let openDetails {
                 Button(action: openDetails) {
@@ -338,6 +374,7 @@ struct FlowBarView: View {
             width: FlowBarLayout.windowSize(for: presentation).width,
             height: FlowBarLayout.windowSize(for: presentation).height
         )
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: presentation)
         .accessibilityElement(children: .contain)
     }
 
@@ -384,13 +421,6 @@ struct FlowBarView: View {
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.72))
                         .monospacedDigit()
-                }
-
-                if presentation == .listening, handsFree {
-                    Image(systemName: "hand.raised.fill")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.mint)
-                        .accessibilityLabel("Handsfree aktiv")
                 }
             }
         } else {

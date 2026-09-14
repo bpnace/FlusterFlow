@@ -610,6 +610,14 @@ final class AppEnvironment {
         }
     }
 
+    func startHandsFreeDictation() {
+        guard operationTask == nil, cancellationTask == nil,
+              activeSessionID == nil, !isCancellationRequested else { return }
+        activationReducer.switchToHandsFree()
+        isHandsFreeActive = true
+        beginPushToTalk()
+    }
+
     private func handleHotKey(_ event: PushToTalkHotKeyEvent) {
         let now = ProcessInfo.processInfo.systemUptime
         let action = activationReducer.consume(event, at: now)
@@ -846,7 +854,7 @@ final class AppEnvironment {
             scheduleFlowBarHide(after: .milliseconds(850))
         case .completed(_, .safeFallback):
             diagnostics.failure(.unconfirmedMutation, stage: .insertion, sessionID: sessionID)
-            showFlow(.failure(DictationFailure(stage: .insertion)))
+            showFlow(.failure(DictationFailure(stage: .insertion, reason: .insertionUnconfirmed)))
             scheduleFlowBarHide(after: .seconds(2))
         case .noSpeech:
             diagnostics.state(.completed, stage: .audioFinalize, sessionID: sessionID)
@@ -869,7 +877,7 @@ final class AppEnvironment {
             let presentation: FlowBarPresentation
             switch outcome {
             case .failed(_, let failure): presentation = .failure(failure)
-            case .completed(_, .safeFallback): presentation = .failure(DictationFailure(stage: .insertion))
+            case .completed(_, .safeFallback): presentation = .failure(DictationFailure(stage: .insertion, reason: .insertionUnconfirmed))
             default: presentation = .historyWarning
             }
             flowBar.show(presentation, openDetails: { [weak self] in
@@ -881,13 +889,30 @@ final class AppEnvironment {
     }
 
     private func showFlow(_ presentation: FlowBarPresentation) {
+        let sessionID = activeSessionID
+        let handsFree = isHandsFreeActive
         flowBar.show(
             presentation,
             recordingStartedAt: presentation == .listening ? recordingStartedAt : nil,
-            handsFree: presentation == .listening && isHandsFreeActive
-        ) { [weak self] in
-            self?.cancelActiveSession()
-        }
+            handsFree: presentation == .listening && handsFree,
+            recordingAction: { [weak self] in
+                guard let self, let sessionID,
+                      self.activeSessionID == sessionID,
+                      self.operationTask == nil,
+                      !self.isCancellationRequested,
+                      self.isHandsFreeActive == handsFree else { return }
+                if handsFree {
+                    self.finishRecordingNow()
+                } else {
+                    self.pendingPushToTalkStopTask?.cancel()
+                    self.pendingPushToTalkStopTask = nil
+                    self.activationReducer.switchToHandsFree()
+                    self.isHandsFreeActive = true
+                    self.showFlow(.listening)
+                }
+            },
+            cancel: { [weak self] in self?.cancelActiveSession() }
+        )
     }
 
     private func resetActivationState() {
@@ -998,7 +1023,9 @@ final class AppEnvironment {
     private func scheduleLargeUnloadAfterIdle() {
         largeIdleUnloadTask?.cancel()
         largeIdleUnloadTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(120))
+            // Keep the fallback model warm across normal pauses. Memory-pressure
+            // notifications still release it immediately when recognition is idle.
+            try? await Task.sleep(for: .seconds(600))
             guard !Task.isCancelled, let self else { return }
             largeIdleUnloadTask = nil
             await unloadLargeIfIdle()
@@ -1059,6 +1086,7 @@ extension DictationFailureStage {
 extension DictationFailure {
     var diagnosticCode: DiagnosticErrorCode {
         switch reason {
+        case .insertionUnconfirmed: .unconfirmedMutation
         case .recognizerBusy: .recognizerBusy
         case .recognitionTimedOut: .recognitionTimedOut
         case .serviceFailure: .serviceFailure

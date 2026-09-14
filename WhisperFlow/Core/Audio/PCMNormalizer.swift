@@ -306,20 +306,13 @@ enum PCMNormalizer {
             from: speechWindows,
             sampleRate: sampleRate
         )
+        let voiceLikeIslands = voiceLikeSpeechIslands(
+            from: rmsWindows,
+            samples: samples,
+            sampleRate: sampleRate
+        )
         guard let firstSpeech = speechIslands.first,
               let lastSpeech = speechIslands.last else {
-            let voiceLikeWindows = rmsWindows.filter { window in
-                guard window.rms >= vadMinimumRMS else { return false }
-                let peak = samples[window.range].reduce(Float(0)) { max($0, abs($1)) }
-                return peak >= max(
-                    vadVoiceLikeFallbackMinimumPeak,
-                    window.rms * vadVoiceLikeFallbackMinimumCrestFactor
-                )
-            }
-            let voiceLikeIslands = significantSpeechIslands(
-                from: voiceLikeWindows,
-                sampleRate: sampleRate
-            )
             let voiceLikeFrameCount = voiceLikeIslands.reduce(0) {
                 $0 + $1.speechFrameCount
             }
@@ -344,13 +337,53 @@ enum PCMNormalizer {
             )
         }
 
+        // Energy VAD is intentionally conservative when the recording has a
+        // loud section: a quieter voiced phrase can sit below the adaptive
+        // threshold and otherwise be trimmed away. Retain a significant
+        // voice-like island at either edge, while leaving the primary energy
+        // gate and its stationary-noise rejection unchanged.
+        let edgeVoiceLikeIslands = voiceLikeIslands.filter { island in
+            island.range.lowerBound < firstSpeech.range.lowerBound
+                || island.range.upperBound > lastSpeech.range.upperBound
+        }
+        let retainedIslands = speechIslands + edgeVoiceLikeIslands
+        let edgeVoiceLikeFrameCount = edgeVoiceLikeIslands.reduce(0) { count, island in
+            // A voice-like island can contain the edge of an energy island
+            // when the speaker gets louder without a pause. Its range still
+            // widens the retained audio, but its overlapping frames are
+            // already represented by the primary energy island.
+            guard island.range.upperBound <= firstSpeech.range.lowerBound
+                || island.range.lowerBound >= lastSpeech.range.upperBound else {
+                return count
+            }
+            return count + island.speechFrameCount
+        }
         let speechFrameCount = speechIslands.reduce(0) { count, island in
             count + island.speechFrameCount
-        }
+        } + edgeVoiceLikeFrameCount
         return SpeechAnalysis(
-            startIndex: firstSpeech.range.lowerBound,
-            endIndex: lastSpeech.range.upperBound,
+            startIndex: retainedIslands.map(\.range.lowerBound).min() ?? firstSpeech.range.lowerBound,
+            endIndex: retainedIslands.map(\.range.upperBound).max() ?? lastSpeech.range.upperBound,
             detectedSpeechDurationSeconds: Double(speechFrameCount) / Double(sampleRate)
+        )
+    }
+
+    private static func voiceLikeSpeechIslands(
+        from windows: [(range: Range<Int>, rms: Float)],
+        samples: [Float],
+        sampleRate: Int
+    ) -> [SpeechIsland] {
+        let voiceLikeWindows = windows.filter { window in
+            guard window.rms >= vadMinimumRMS else { return false }
+            let peak = samples[window.range].reduce(Float(0)) { max($0, abs($1)) }
+            return peak >= max(
+                vadVoiceLikeFallbackMinimumPeak,
+                window.rms * vadVoiceLikeFallbackMinimumCrestFactor
+            )
+        }
+        return significantSpeechIslands(
+            from: voiceLikeWindows,
+            sampleRate: sampleRate
         )
     }
 

@@ -492,7 +492,7 @@ struct RecordingHistoryView: View {
     private var retranscriptionPicker: some View {
         Picker("Lokales Modell", selection: $model.selectedModel) {
             ForEach(LocalModelChoice.allCases) { choice in
-                Text(choice.title).tag(choice)
+                Text(model.isModelReady(choice) ? choice.title : "\(choice.title) – nicht verfügbar").tag(choice)
                     .disabled(!model.isModelReady(choice))
             }
         }
@@ -501,6 +501,9 @@ struct RecordingHistoryView: View {
 
     private var retranscriptionButton: some View {
         Button("Neu transkribieren") { model.retranscribeSelected() }
+            .help(model.isModelReady(model.selectedModel)
+                ? "Erstellt eine neue Version mit dem ausgewählten Modell."
+                : "Dieses Modell ist nicht einsatzbereit. Bitte unter Modelle prüfen und installieren.")
             .disabled(
                 model.selectedEntry?.hasAudio != true
                     || model.selectedEntry?.state == .recording

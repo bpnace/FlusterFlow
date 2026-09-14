@@ -38,6 +38,13 @@ struct DictationActivationReducer: Sendable {
         ignoreNextRelease = false
     }
 
+    /// Explicit UI promotion is independent of the optional double-tap gesture.
+    mutating func switchToHandsFree() {
+        isHandsFreeActive = true
+        secondTapDeadline = nil
+        ignoreNextRelease = isPushToTalkPressed
+    }
+
     func isAwaitingSecondTap(at time: TimeInterval) -> Bool {
         guard mode == .doubleTap,
               let secondTapDeadline else { return false }

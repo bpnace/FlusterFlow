@@ -50,6 +50,8 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
     private var activeGeneration: UInt64?
     private var segmentDrainTask: Task<AudioCaptureSpoolError?, Never>?
     private var segmentDrainGeneration: UInt64?
+    private var speechFilterTask: Task<AudioSamples, Never>?
+    private var speechFilterGeneration: UInt64?
     private var configurationObserver: (any NSObjectProtocol)?
     private var terminalError: AudioCaptureError?
     private var isFinalizing = false
@@ -150,7 +152,26 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
             let normalized = try PCMNormalizer.normalize(
                 sessionSpool.readAllChunks()
             )
-            return await store.store(normalized)
+            let filterTask = Task.detached(priority: .userInitiated) {
+                ShortAudioSpeechFilter.filter(
+                    normalized,
+                    shouldCancel: { Task.isCancelled }
+                )
+            }
+            speechFilterTask = filterTask
+            speechFilterGeneration = generation
+            defer { cancelSpeechFilter(for: generation) }
+            let filtered = await withTaskCancellationHandler(operation: {
+                await filterTask.value
+            }, onCancel: {
+                filterTask.cancel()
+            })
+            guard !Task.isCancelled,
+                  isCurrentSession(sessionID, generation: generation),
+                  cancellationRequestedGeneration != generation else {
+                throw AudioCaptureError.captureNotActive
+            }
+            return await store.store(filtered)
         } catch let error as AudioCaptureError {
             throw error
         } catch let error as AudioCaptureSpoolError {
@@ -205,6 +226,7 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         guard activeSessionID == sessionID,
               let generation = activeGeneration else { return }
         cancellationRequestedGeneration = generation
+        cancelSpeechFilter(for: generation)
         let sessionSpool = spool
         await stopCurrentSegment()
         guard isCurrentSession(sessionID, generation: generation) else { return }
@@ -494,6 +516,9 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
     }
 
     private func clearSession() {
+        if let generation = activeGeneration {
+            cancelSpeechFilter(for: generation)
+        }
         removeConfigurationObserver()
         engine = nil
         spool = nil
@@ -506,6 +531,13 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         cancellationRequestedGeneration = nil
         tapInstalled = false
         isRecoveringConfiguration = false
+    }
+
+    private func cancelSpeechFilter(for generation: UInt64) {
+        guard speechFilterGeneration == generation else { return }
+        speechFilterTask?.cancel()
+        speechFilterTask = nil
+        speechFilterGeneration = nil
     }
 
     private func isCurrentSession(

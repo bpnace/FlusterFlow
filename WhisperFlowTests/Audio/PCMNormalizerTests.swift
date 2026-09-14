@@ -30,6 +30,69 @@ final class PCMNormalizerTests: XCTestCase {
         XCTAssertEqual(result.timing.processedDurationSeconds, 0.7, accuracy: 0.021)
     }
 
+    func testQuieterVoicedEdgesAreRetainedAroundLoudSpeech() throws {
+        let sampleRate = 16_000.0
+        let input = silence(sampleRate: sampleRate, durationSeconds: 0.2)
+            + voicedPulseTrain(
+                sampleRate: sampleRate,
+                durationSeconds: 0.6,
+                amplitude: 0.004
+            )
+            + silence(sampleRate: sampleRate, durationSeconds: 0.25)
+            + voicedPulseTrain(
+                sampleRate: sampleRate,
+                durationSeconds: 0.8,
+                amplitude: 0.08
+            )
+            + silence(sampleRate: sampleRate, durationSeconds: 0.25)
+            + voicedPulseTrain(
+                sampleRate: sampleRate,
+                durationSeconds: 0.6,
+                amplitude: 0.004
+            )
+            + silence(sampleRate: sampleRate, durationSeconds: 0.2)
+
+        let result = try PCMNormalizer.normalize([
+            CapturedAudioChunk(monoSamples: input, sampleRate: sampleRate)
+        ])
+
+        XCTAssertFalse(result.timing.isSilent)
+        XCTAssertLessThan(result.timing.leadingSilenceTrimmedSeconds, 0.08)
+        XCTAssertLessThan(result.timing.trailingSilenceTrimmedSeconds, 0.08)
+        XCTAssertGreaterThan(result.timing.detectedSpeechDurationSeconds, 0.55)
+        XCTAssertGreaterThan(result.timing.processedDurationSeconds, 2.5)
+    }
+
+    func testQuieterVoicedEdgesBlendedIntoLoudSpeechAreNotTrimmed() throws {
+        let sampleRate = 16_000.0
+        let input = silence(sampleRate: sampleRate, durationSeconds: 0.2)
+            + voicedPulseTrain(
+                sampleRate: sampleRate,
+                durationSeconds: 0.6,
+                amplitude: 0.004
+            )
+            + voicedPulseTrain(
+                sampleRate: sampleRate,
+                durationSeconds: 0.8,
+                amplitude: 0.08
+            )
+            + voicedPulseTrain(
+                sampleRate: sampleRate,
+                durationSeconds: 0.6,
+                amplitude: 0.004
+            )
+            + silence(sampleRate: sampleRate, durationSeconds: 0.2)
+
+        let result = try PCMNormalizer.normalize([
+            CapturedAudioChunk(monoSamples: input, sampleRate: sampleRate)
+        ])
+
+        XCTAssertFalse(result.timing.isSilent)
+        XCTAssertLessThan(result.timing.leadingSilenceTrimmedSeconds, 0.08)
+        XCTAssertLessThan(result.timing.trailingSilenceTrimmedSeconds, 0.08)
+        XCTAssertGreaterThan(result.timing.processedDurationSeconds, 2.1)
+    }
+
     func testWhisperLevelSpeechIsKeptAndGentlyNormalized() throws {
         let input = silence(sampleRate: 16_000, durationSeconds: 0.1)
             + sineWave(sampleRate: 16_000, durationSeconds: 0.35, amplitude: 0.006)
@@ -255,6 +318,22 @@ final class PCMNormalizerTests: XCTestCase {
         let count = Int((sampleRate * durationSeconds).rounded())
         return (0..<count).map { index in
             amplitude * Float(sin((2 * Double.pi * frequency * Double(index)) / sampleRate))
+        }
+    }
+
+    private func voicedPulseTrain(
+        sampleRate: Double,
+        durationSeconds: Double,
+        amplitude: Float
+    ) -> [Float] {
+        let count = Int((sampleRate * durationSeconds).rounded())
+        return (0..<count).map { index in
+            let time = Double(index) / sampleRate
+            let pulsePhase = time.truncatingRemainder(dividingBy: 0.08)
+            guard pulsePhase < 0.025 else { return 0 }
+            let carrier = sin(2 * Double.pi * 180 * time)
+            let harmonic = 0.25 * sin(2 * Double.pi * 360 * time)
+            return amplitude * Float(carrier + harmonic)
         }
     }
 
