@@ -216,7 +216,8 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
             chunk: RecognitionAudioChunk(
                 samples: samples,
                 sampleRate: sampleRate,
-                channelCount: 1
+                channelCount: 1,
+                sourceChunks: batch.chunks
             ),
             nextFrameOffset: batch.nextFrameOffset
         )

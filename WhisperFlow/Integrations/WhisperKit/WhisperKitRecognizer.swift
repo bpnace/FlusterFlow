@@ -90,8 +90,19 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
     static let promptTokenBudget = 128
 
     private struct IncrementalSession: Sendable {
-        var acceptedSampleCount: Int
+        let language: WhisperKitLanguageMode
+        var sourceChunks: [CapturedAudioChunk] = []
+        var sourceFrames = 0
+        var sourceDuration = 0.0
+        var nextPreviewAt = 21.0
+        var preview: Task<Void, Never>?
+        var isStopping = false
     }
+
+    // Raw capture is retained only for the first preview windows. Longer
+    // recordings still use the file-backed capture and the full final decoder.
+    private static let maximumPreviewSourceFrames = 3_600_000
+    private static let maximumPreviewSourceSeconds = 75.0
 
     private struct PrewarmOperation: Sendable {
         let id: UInt64
@@ -209,9 +220,12 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
     }
 
     func cancel(sessionID: DictationSessionID) async {
-        incrementalSessions[sessionID] = nil
+        let preview = incrementalSessions.removeValue(forKey: sessionID)?.preview
+        preview?.cancel()
         await cancelModelOperations()
         await runtime.cancel(sessionID: sessionID)
+        await preview?.value
+        await (runtime as? OfflineWhisperKitRuntime)?.discardCompletedChunks(for: sessionID)
     }
 
     func prepareForRecording(
@@ -227,9 +241,9 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
         hints: RecognitionHints,
         sessionID: DictationSessionID
     ) async throws {
-        _ = hints
         try await prewarm()
-        incrementalSessions[sessionID] = IncrementalSession(acceptedSampleCount: 0)
+        try Task.checkCancellation()
+        incrementalSessions[sessionID] = IncrementalSession(language: Self.languageMode(for: hints.language))
     }
 
     func updateRecognitionSession(
@@ -243,18 +257,65 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
                 channelCount: chunk.channelCount
             )
         }
-        guard var incremental = incrementalSessions.removeValue(forKey: sessionID) else {
+        guard var incremental = incrementalSessions[sessionID], !incremental.isStopping else {
             return .ignoredBatchRecognizer
         }
 
-        incremental.acceptedSampleCount += chunk.samples.count
+        if let runtime = runtime as? OfflineWhisperKitRuntime,
+           !chunk.sourceChunks.isEmpty,
+           incremental.sourceFrames < Self.maximumPreviewSourceFrames,
+           incremental.sourceDuration < Self.maximumPreviewSourceSeconds {
+            let frameCount = chunk.sourceChunks.reduce(0) { $0 + $1.monoSamples.count }
+            let duration = chunk.sourceChunks.reduce(0.0) {
+                $0 + Double($1.monoSamples.count) / $1.sampleRate
+            }
+            if frameCount <= Self.maximumPreviewSourceFrames - incremental.sourceFrames,
+               duration <= Self.maximumPreviewSourceSeconds - incremental.sourceDuration {
+                incremental.sourceChunks.append(contentsOf: chunk.sourceChunks)
+                incremental.sourceFrames += frameCount
+                incremental.sourceDuration += duration
+                if incremental.preview == nil, incremental.sourceDuration >= incremental.nextPreviewAt {
+                    incremental.nextPreviewAt = incremental.sourceDuration + 9
+                    let source = incremental.sourceChunks
+                    let language = incremental.language
+                    incremental.preview = Task.detached(priority: .utility) { [weak self] in
+                        // Use the same normalization as the final recording. The
+                        // final span and signal are checked again before reuse.
+                        if let audio = try? PCMNormalizer.normalize(source), !Task.isCancelled {
+                            try? await runtime.decodeCompletedChunks(
+                                audio.values,
+                                language: language,
+                                sessionID: sessionID
+                            )
+                        }
+                        await self?.finishPreview(for: sessionID)
+                    }
+                }
+            } else {
+                incremental.sourceFrames = Self.maximumPreviewSourceFrames
+                incremental.sourceChunks.removeAll()
+            }
+        }
         incrementalSessions[sessionID] = incremental
         return .accepted
     }
 
+    private func finishPreview(for sessionID: DictationSessionID) {
+        incrementalSessions[sessionID]?.preview = nil
+    }
+
     func stopRecognitionSession(sessionID: DictationSessionID) async {
+        incrementalSessions[sessionID]?.isStopping = true
+        incrementalSessions[sessionID]?.sourceChunks.removeAll()
+        if let preview = incrementalSessions[sessionID]?.preview {
+            // Finish an already-running decode so finalization can reuse it.
+            // Cancel the preview loop to prevent any further chunks starting.
+            preview.cancel()
+            await preview.value
+        } else {
+            await runtime.cancel(sessionID: sessionID)
+        }
         incrementalSessions[sessionID] = nil
-        await runtime.cancel(sessionID: sessionID)
     }
 
     func finalizeRecognitionSession(
@@ -262,7 +323,9 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
         hints: RecognitionHints,
         sessionID: DictationSessionID
     ) async throws -> RawTranscript {
-        incrementalSessions[sessionID] = nil
+        if incrementalSessions[sessionID] != nil {
+            await stopRecognitionSession(sessionID: sessionID)
+        }
         return try await transcribe(audio, hints: hints, sessionID: sessionID)
     }
 
@@ -307,11 +370,16 @@ actor WhisperKitRecognizer: SpeechRecognizing, SpeechRecognitionLifecycle {
     }
 
     func unload() async {
+        let previews = incrementalSessions.values.compactMap(\.preview)
+        previews.forEach { $0.cancel() }
         incrementalSessions.removeAll()
         await cancelModelOperations()
         runtimePrepared = false
         runtimePrewarmed = false
         await runtime.unload()
+        for preview in previews {
+            await preview.value
+        }
     }
 
     private func prepareIfNeeded() async throws {
@@ -550,13 +618,22 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
 
     private struct ActiveTranscription: Sendable {
         let token: UUID
-        let task: Task<WhisperKitRecognitionResult, Error>
+        let cancel: @Sendable () -> Void
+        let waitForCompletion: @Sendable () async -> Void
+    }
+
+    private struct CompletedChunk: Sendable {
+        let audio: AudioChunk
+        let language: WhisperKitLanguageMode
+        let results: [TranscriptionResult]
     }
 
     private var runtime: RuntimeBox?
     private var preparedModelDirectory: URL?
     private var preparedTokenizerDirectory: URL?
     private var activeTasks: [DictationSessionID: ActiveTranscription] = [:]
+    private var completedChunks: [DictationSessionID: [Int: CompletedChunk]] = [:]
+    private let performanceLogger = Logger(subsystem: "local.flusterflow", category: "performance")
 
     func prepare(modelDirectory: URL, tokenizerDirectory: URL) async throws {
         let modelDirectory = modelDirectory.standardizedFileURL
@@ -569,6 +646,7 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
         if let runtime {
             await runtime.whisperKit.unloadModels()
         }
+        completedChunks.removeAll()
 
         let configuration = WhisperKitConfig(
             modelFolder: modelDirectory.path,
@@ -607,11 +685,12 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
 
     func unload() async {
         let tasks = Array(activeTasks.values)
-        tasks.forEach { $0.task.cancel() }
+        tasks.forEach { $0.cancel() }
         for active in tasks {
-            _ = await active.task.result
+            await active.waitForCompletion()
         }
         activeTasks.removeAll()
+        completedChunks.removeAll()
         if let runtime {
             await runtime.whisperKit.unloadModels()
         }
@@ -666,6 +745,8 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
         }
 
         let options = Self.decodingOptions(language: language, promptTokens: promptTokens)
+        let cached = completedChunks.removeValue(forKey: sessionID) ?? [:]
+        let performanceLogger = performanceLogger
 
         return try await runTrackedTranscription(sessionID: sessionID) {
             // The installed decoder has a 128-token cache. Split long audio
@@ -673,16 +754,99 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
             // 30-second window exhausting the cache and omitting speech.
             let chunks = try await Self.finalAudioChunks(samples)
             var results: [TranscriptionResult] = []
+            var reusedCount = 0
             for chunk in chunks {
                 try Task.checkCancellation()
-                results += try await runtime.whisperKit.transcribe(
+                if let earlier = cached[chunk.seekOffsetIndex],
+                   earlier.language == language,
+                   Self.matchesCompletedAudio(earlier.audio, chunk) {
+                    results += earlier.results
+                    reusedCount += 1
+                } else {
+                    results += try await runtime.whisperKit.transcribe(
+                        audioArray: chunk.audioSamples,
+                        decodeOptions: options
+                    )
+                }
+            }
+            try Task.checkCancellation()
+            if !cached.isEmpty {
+                performanceLogger.info("performance=whisperLiveReuse reused_chunks=\(reusedCount, privacy: .public) final_chunks=\(chunks.count, privacy: .public)")
+            }
+            return Self.recognitionResult(from: results)
+        }
+    }
+
+    func decodeCompletedChunks(
+        _ samples: [Float],
+        language: WhisperKitLanguageMode,
+        sessionID: DictationSessionID
+    ) async throws {
+        try Task.checkCancellation()
+        guard let runtime, activeTasks.isEmpty, !samples.isEmpty else { return }
+        let chunks = try await Self.finalAudioChunks(samples).dropLast()
+        try Task.checkCancellation()
+        let options = Self.decodingOptions(language: language, promptTokens: [])
+        let offsets = Set(chunks.map(\.seekOffsetIndex))
+        completedChunks[sessionID] = completedChunks[sessionID]?.filter { offsets.contains($0.key) }
+        // The last chunk can still change as more speech arrives.
+        for chunk in chunks {
+            try Task.checkCancellation()
+            guard activeTasks.isEmpty else { return }
+            if let earlier = completedChunks[sessionID]?[chunk.seekOffsetIndex],
+               earlier.language == language,
+               Self.matchesCompletedAudio(earlier.audio, chunk) {
+                continue
+            }
+            let results = try await runTrackedTranscription(sessionID: sessionID) {
+                let decoded = try await runtime.whisperKit.transcribe(
                     audioArray: chunk.audioSamples,
                     decodeOptions: options
                 )
+                try Task.checkCancellation()
+                return decoded
             }
-            try Task.checkCancellation()
-            return Self.recognitionResult(from: results)
+            completedChunks[sessionID, default: [:]][chunk.seekOffsetIndex] = CompletedChunk(
+                audio: chunk,
+                language: language,
+                results: results
+            )
         }
+    }
+
+    func discardCompletedChunks(for sessionID: DictationSessionID) {
+        completedChunks[sessionID] = nil
+    }
+
+    nonisolated static func matchesCompletedAudio(_ earlier: AudioChunk, _ final: AudioChunk) -> Bool {
+        let count = earlier.audioSamples.count
+        guard earlier.seekOffsetIndex == final.seekOffsetIndex,
+              count == final.audioSamples.count, count > 0 else { return false }
+
+        // The complete recording can choose a different gain and DC offset.
+        // Require the same span and an almost identical centered waveform.
+        var earlierSum = 0.0
+        var finalSum = 0.0
+        var earlierSquares = 0.0
+        var finalSquares = 0.0
+        var crossProduct = 0.0
+        for index in 0..<count {
+            let first = Double(earlier.audioSamples[index])
+            let second = Double(final.audioSamples[index])
+            earlierSum += first
+            finalSum += second
+            earlierSquares += first * first
+            finalSquares += second * second
+            crossProduct += first * second
+        }
+        let size = Double(count)
+        let earlierEnergy = earlierSquares - earlierSum * earlierSum / size
+        let finalEnergy = finalSquares - finalSum * finalSum / size
+        let covariance = crossProduct - earlierSum * finalSum / size
+        guard earlierEnergy > 0, finalEnergy > 0, covariance > 0 else { return false }
+        let gainSquared = finalEnergy / earlierEnergy
+        return (0.64...1.5625).contains(gainSquared)
+            && covariance * covariance >= 0.999 * earlierEnergy * finalEnergy
     }
 
     nonisolated static func finalAudioChunks(_ samples: [Float]) async throws -> [AudioChunk] {
@@ -701,22 +865,24 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
 
     func cancel(sessionID: DictationSessionID) async {
         guard let active = activeTasks[sessionID] else { return }
-        active.task.cancel()
-        _ = await active.task.result
+        active.cancel()
+        await active.waitForCompletion()
         removeActiveTask(active, for: sessionID)
     }
 
-    func runTrackedTranscription(
+    func runTrackedTranscription<Result: Sendable>(
         sessionID: DictationSessionID,
-        operation: @escaping @Sendable () async throws -> WhisperKitRecognitionResult
-    ) async throws -> WhisperKitRecognitionResult {
+        operation: @escaping @Sendable () async throws -> Result
+    ) async throws -> Result {
+        let task = Task(operation: operation)
         let active = ActiveTranscription(
             token: UUID(),
-            task: Task(operation: operation)
+            cancel: { task.cancel() },
+            waitForCompletion: { _ = await task.result }
         )
         activeTasks[sessionID] = active
         defer { removeActiveTask(active, for: sessionID) }
-        return try await active.task.value
+        return try await task.value
     }
 
     private func removeActiveTask(
