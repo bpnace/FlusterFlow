@@ -400,7 +400,6 @@ final class SettingsStore: ObservableObject {
         return PushToTalkShortcut.legacyValue(defaults.string(forKey: Key.shortcut))
             ?? .controlOptionSpace
     }
-
 }
 
 extension DictationLanguage {

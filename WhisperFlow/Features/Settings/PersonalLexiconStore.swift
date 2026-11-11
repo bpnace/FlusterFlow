@@ -267,7 +267,6 @@ final class PersonalLexiconStore: ObservableObject {
         }
         return true
     }
-
 }
 
 private struct PersistentPersonalLexiconEntry: Codable {
