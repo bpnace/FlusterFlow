@@ -42,7 +42,17 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Build unsigned debug app and run capped tests
+      - name: Build unsigned debug app
+        run: |
+          xcodebuild \
+            -project WhisperFlow.xcodeproj \
+            -scheme WhisperFlow \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Run capped app tests using the Xcode build
         run: bash Scripts/run-capped-tests.sh
 
       - name: Build and test verification tools
