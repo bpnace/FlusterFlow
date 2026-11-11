@@ -4,13 +4,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-swift build --product TextTargetHarness
-swift build --target TextTargetHarnessTests
+if [[ $# -eq 0 ]]; then
+  swift build --product TextTargetHarness
+  swift build --target TextTargetHarnessTests
+  bin_dir=.build/debug
+elif [[ $# -eq 2 && "$1" == "--bin-dir" && -n "$2" ]]; then
+  bin_dir="$2"
+else
+  echo "usage: $0 [--bin-dir <path>]" >&2
+  exit 64
+fi
+target_harness="$bin_dir/TextTargetHarness"
 
 failure_report="$(mktemp -t flusterflow-target-failure)"
 trap 'rm -f "$failure_report"' EXIT
 
-.build/debug/TextTargetHarness \
+"$target_harness" \
   --validate-contract \
   --scenarios TestSupport/TextTargetHarness/scenarios.json
 
@@ -32,7 +41,7 @@ jq -e '.properties.status.enum | index("tccRequired") != null' \
   TestSupport/TextTargetHarness/result.schema.json >/dev/null
 
 set +e
-.build/debug/TextTargetHarness \
+"$target_harness" \
   --validate-contract \
   --scenarios /tmp/flusterflow-private-path-secret/missing.json >"$failure_report"
 failure_exit=$?
