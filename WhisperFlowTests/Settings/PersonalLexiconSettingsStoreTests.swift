@@ -4,6 +4,63 @@ import XCTest
 
 final class PersonalLexiconSettingsStoreTests: XCTestCase, @unchecked Sendable {
     @MainActor
+    func testOpeningExistingPreferencesPreservesSettingsAndPersonalDictionary() throws {
+        XCTAssertEqual(FlusterFlowPreferences.domain, "com.flusterflow.private")
+        let suiteName = "FlusterFlowUpdateTests-\(UUID().uuidString)"
+        let previousDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { previousDefaults.removePersistentDomain(forName: suiteName) }
+
+        let dictionary = Data("""
+        [{
+          "id": "13A5333C-4C50-4D7C-8DFB-2F98A997AB75",
+          "canonical": "München",
+          "misspellings": ["Munchen"],
+          "language": "german",
+          "priority": 7,
+          "source": "manual",
+          "createdAt": 0,
+          "updatedAt": 0
+        }]
+        """.utf8)
+        let saved: [String: Any] = [
+            "flusterflow.personal-lexicon.entries": dictionary,
+            "flusterflow.language": "german",
+            "flusterflow.shortcut": "controlShiftSpace",
+            "flusterflow.local-model": "whisperKitLargeV3Turbo",
+            "flusterflow.context-awareness": false,
+            "flusterflow.local-learning-enabled": false,
+            "flusterflow.push-to-talk-enabled": false,
+            "flusterflow.hands-free-enabled": true,
+            "flusterflow.cloud-enabled": true,
+            "flusterflow.cloud-context": false,
+            "flusterflow.onboarding-completed": true,
+            "flusterflow.future-setting": "preserve"
+        ]
+        previousDefaults.setPersistentDomain(saved, forName: suiteName)
+
+        let updatedDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let settings = SettingsStore(defaults: updatedDefaults)
+        let lexicon = PersonalLexiconStore(defaults: updatedDefaults)
+
+        XCTAssertEqual(settings.language, .german)
+        XCTAssertEqual(settings.shortcut, .controlShiftSpace)
+        XCTAssertEqual(settings.localModel, .whisperKitLargeV3Turbo)
+        XCTAssertFalse(settings.contextAwarenessEnabled)
+        XCTAssertFalse(settings.localLearningEnabled)
+        XCTAssertFalse(settings.pushToTalkEnabled)
+        XCTAssertTrue(settings.handsFreeEnabled)
+        XCTAssertTrue(settings.cloudEnabled)
+        XCTAssertFalse(settings.cloudContextEnabled)
+        XCTAssertTrue(settings.onboardingCompleted)
+        XCTAssertEqual(lexicon.entries.count, 1)
+        XCTAssertEqual(lexicon.entries.first?.canonical, "München")
+        XCTAssertEqual(lexicon.entries.first?.misspellings, ["Munchen"])
+        XCTAssertEqual(lexicon.entries.first?.priority, 7)
+        let afterOpening = try XCTUnwrap(updatedDefaults.persistentDomain(forName: suiteName))
+        XCTAssertEqual(NSDictionary(dictionary: afterOpening), NSDictionary(dictionary: saved))
+    }
+
+    @MainActor
     func testManualEntriesCanBeAddedEditedPrioritizedUndoneDeletedAndReset() throws {
         try withIsolatedDefaults { defaults in
             let store = PersonalLexiconStore(defaults: defaults)

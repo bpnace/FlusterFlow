@@ -100,6 +100,27 @@ rollback_install() {
   INSTALL_REPLACED=false
 }
 
+replace_app_bundle() {
+  PREVIOUS_APP="$STAGING_ROOT/previous-install.bundle-backup"
+  if [ -d "$INSTALL_APP" ]; then
+    HAD_PREVIOUS_INSTALL=true
+  fi
+  INSTALL_TRANSACTION_STARTED=true
+  if [ "$HAD_PREVIOUS_INSTALL" = true ] && ! /bin/mv "$INSTALL_APP" "$PREVIOUS_APP"; then
+    emit_status "failed" "previous_app_backup_failed"
+    return 1
+  fi
+  INSTALL_REPLACED=true
+  if ! /bin/mv "$STAGED_APP" "$INSTALL_APP"; then
+    if ! rollback_install; then
+      emit_status "failed" "atomic_install_failed_and_rollback_failed"
+      return 1
+    fi
+    emit_status "failed" "atomic_install_failed_install_rolled_back"
+    return 1
+  fi
+}
+
 find_installed_process() {
   local expected_executable="$INSTALL_APP/Contents/MacOS/FlusterFlow"
   local pid
@@ -328,23 +349,7 @@ if /usr/bin/pgrep -x FlusterFlow >/dev/null 2>&1; then
   exit 1
 fi
 
-PREVIOUS_APP="$STAGING_ROOT/previous-install.bundle-backup"
-if [ -d "$INSTALL_APP" ]; then
-  HAD_PREVIOUS_INSTALL=true
-fi
-INSTALL_TRANSACTION_STARTED=true
-if [ "$HAD_PREVIOUS_INSTALL" = true ]; then
-  /bin/mv "$INSTALL_APP" "$PREVIOUS_APP"
-fi
-INSTALL_REPLACED=true
-if ! /bin/mv "$STAGING_ROOT/FlusterFlow.app" "$INSTALL_APP"; then
-  if ! rollback_install; then
-    emit_status "failed" "atomic_install_failed_and_rollback_failed"
-    exit 1
-  fi
-  emit_status "failed" "atomic_install_failed_install_rolled_back"
-  exit 1
-fi
+replace_app_bundle
 if ! /usr/bin/open -n "$INSTALL_APP"; then
   if ! rollback_install; then
     emit_status "failed" "installed_app_launch_failed_and_rollback_failed"
