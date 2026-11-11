@@ -60,17 +60,20 @@ struct RecognitionAudioChunk: Equatable, Sendable {
     let sampleRate: Int
     let channelCount: Int
     let isFinal: Bool
+    let sourceChunks: [CapturedAudioChunk]
 
     init(
         samples: [Float],
         sampleRate: Int = AudioSamples.recognizerSampleRate,
         channelCount: Int = 1,
-        isFinal: Bool = false
+        isFinal: Bool = false,
+        sourceChunks: [CapturedAudioChunk] = []
     ) {
         self.samples = samples
         self.sampleRate = sampleRate
         self.channelCount = channelCount
         self.isFinal = isFinal
+        self.sourceChunks = sourceChunks
     }
 }
 

@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+@preconcurrency import WhisperKit
 import Foundation
 import XCTest
 @testable import WhisperFlow
@@ -137,6 +138,24 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         XCTAssertGreaterThan(first.audioSamples.count, 12 * 16_000)
         XCTAssertLessThan(first.audioSamples.count, Int(12.4 * 16_000))
         XCTAssertEqual(chunks.flatMap(\.audioSamples), samples)
+    }
+
+    func testCompletedWhisperChunkRequiresTheSameSpanAndWaveform() {
+        let speech = (0..<1_024).map { Float(sin(Double($0) * 0.2)) * 0.1 }
+        let original = AudioChunk(seekOffsetIndex: 200, audioSamples: speech)
+        let adjusted = speech.map { $0 * 0.9 + 0.001 }
+        XCTAssertTrue(OfflineWhisperKitRuntime.matchesCompletedAudio(
+            original, AudioChunk(seekOffsetIndex: 200, audioSamples: adjusted)
+        ))
+        XCTAssertFalse(OfflineWhisperKitRuntime.matchesCompletedAudio(
+            original, AudioChunk(seekOffsetIndex: 201, audioSamples: adjusted)
+        ))
+        XCTAssertFalse(OfflineWhisperKitRuntime.matchesCompletedAudio(
+            original, AudioChunk(seekOffsetIndex: 200, audioSamples: Array(adjusted.dropLast()))
+        ))
+        XCTAssertFalse(OfflineWhisperKitRuntime.matchesCompletedAudio(
+            original, AudioChunk(seekOffsetIndex: 200, audioSamples: Array(adjusted.reversed()))
+        ))
     }
 
     func testFinalAudioChunkingPreservesEverySampleIncludingShortTail() async throws {
