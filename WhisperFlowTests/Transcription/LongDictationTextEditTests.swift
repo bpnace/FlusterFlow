@@ -126,40 +126,37 @@ final class LongDictationTextEditTests: XCTestCase, @unchecked Sendable {
         let targetText = try focusedText(in: textEdit)
         XCTAssertEqual(targetText, transcript.text)
         let quality = wordQuality(reference: reference, candidate: transcript.text)
-        let batchComparison: (quality: WordQuality, matchesCandidateWords: Bool)?
+        let stopMilliseconds = milliseconds(release.duration(to: insertedAt))
+        let insertionMilliseconds = milliseconds(insertionStarted.duration(to: insertedAt))
+        var metrics: [String] = [
+            "FLUSTERFLOW_LONG_TEXTEDIT",
+            "stop_to_insert_ms=\(stopMilliseconds)",
+            "insertion_ms=\(insertionMilliseconds)",
+            "reference_words=\(quality.referenceWords)",
+            "candidate_words=\(quality.candidateWords)",
+            "edits=\(quality.edits)",
+            "deletions=\(quality.deletions)",
+            "insertions=\(quality.insertions)",
+            "substitutions=\(quality.substitutions)",
+            "adjacent_duplicates=\(quality.adjacentDuplicates)"
+        ]
         if environment["FLUSTERFLOW_LONG_TEXTEDIT_COMPARE_BATCH"] == "1" {
             let batchTranscript = try await recognizer.transcribe(
                 input,
                 hints: hints,
                 sessionID: DictationSessionID(rawValue: 71_002)
             )
-            batchComparison = (
-                wordQuality(reference: reference, candidate: batchTranscript.text),
-                words(batchTranscript.text) == words(transcript.text)
-            )
-        } else {
-            batchComparison = nil
+            let batchQuality = wordQuality(reference: reference, candidate: batchTranscript.text)
+            let matchesBatchWords = words(batchTranscript.text) == words(transcript.text)
+            metrics.append(contentsOf: [
+                "batch_edits=\(batchQuality.edits)",
+                "batch_deletions=\(batchQuality.deletions)",
+                "batch_insertions=\(batchQuality.insertions)",
+                "batch_substitutions=\(batchQuality.substitutions)",
+                "matches_batch_words=\(matchesBatchWords)"
+            ])
         }
-        let batchMetrics = batchComparison.map {
-            " batch_edits=\($0.quality.edits)"
-                + " batch_deletions=\($0.quality.deletions)"
-                + " batch_insertions=\($0.quality.insertions)"
-                + " batch_substitutions=\($0.quality.substitutions)"
-                + " matches_batch_words=\($0.matchesCandidateWords)"
-        } ?? ""
-        print(
-            "FLUSTERFLOW_LONG_TEXTEDIT "
-                + "stop_to_insert_ms=\(milliseconds(release.duration(to: insertedAt))) "
-                + "insertion_ms=\(milliseconds(insertionStarted.duration(to: insertedAt))) "
-                + "reference_words=\(quality.referenceWords) "
-                + "candidate_words=\(quality.candidateWords) "
-                + "edits=\(quality.edits) "
-                + "deletions=\(quality.deletions) "
-                + "insertions=\(quality.insertions) "
-                + "substitutions=\(quality.substitutions) "
-                + "adjacent_duplicates=\(quality.adjacentDuplicates)"
-                + batchMetrics
-        )
+        print(metrics.joined(separator: " "))
     }
 
     private func openIsolatedTextEdit(documentURL: URL) async throws -> NSRunningApplication {
