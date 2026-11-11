@@ -128,7 +128,9 @@ final class AppEnvironment {
     private let localRewriter: FoundationModelsTextRewriter
     private let sessionDiagnostics: ContentFreeSessionDiagnostics
     private let fallbackResults: EphemeralResultStore
+    private let audioCapture: AVAudioEngineCapture
     private let flowBar = FlowBarController()
+    private var inputMeter: AudioInputMeter?
     private let recoveryModel = DictationRecoveryModel()
     private let diagnosticsViewModel: DiagnosticsViewModel
 
@@ -347,6 +349,7 @@ final class AppEnvironment {
         self.diagnosticsStore = diagnosticsStore
         self.diagnosticsBaseline = diagnosticsBaseline
         coordinator = composition.coordinator
+        audioCapture = composition.audioCapture
         enrichment = composition.enrichment
         localRewriter = composition.localRewriter
         sessionDiagnostics = composition.sessionDiagnostics
@@ -438,8 +441,11 @@ final class AppEnvironment {
         modelProvisioning.refresh()
         let registered = registerConfiguredHotKey()
         setCancellationAvailability(false)
-        Task { [adaptiveRecognizer] in
-            try? await adaptiveRecognizer.prewarmTurbo()
+        let localModel = settings.localModel
+        if localModel == .adaptive || localModel == .whisperKitLargeV3Turbo {
+            Task { [adaptiveRecognizer] in
+                try? await adaptiveRecognizer.prewarmTurbo()
+            }
         }
         return registered
     }
@@ -749,6 +755,7 @@ final class AppEnvironment {
                         )
                     )
                 }
+                let meter = await audioCapture.inputMeter(for: sessionID)
                 guard !isCancellationRequested else {
                     let cancellationOutcome = await coordinator.cancel(sessionID: sessionID)
                     await speechRecognizer.cancel(sessionID: sessionID)
@@ -756,6 +763,7 @@ final class AppEnvironment {
                     return
                 }
                 activeSessionID = sessionID
+                inputMeter = meter
                 recordingStartedAt = actualRecordingStartedAt
                 diagnostics.state(.started, stage: .audioFinalize, sessionID: sessionID)
                 showFlow(.listening)
@@ -782,6 +790,7 @@ final class AppEnvironment {
                     scheduleFlowBarHide(after: .seconds(2))
                     return
                 }
+                let meter = await audioCapture.inputMeter(for: sessionID)
                 guard !isCancellationRequested else {
                     let cancellationOutcome = await coordinator.cancel(sessionID: sessionID)
                     await speechRecognizer.cancel(sessionID: sessionID)
@@ -789,6 +798,7 @@ final class AppEnvironment {
                     return
                 }
                 activeSessionID = sessionID
+                inputMeter = meter
                 showFlow(.listening)
                 setCancellationAvailability(true)
             case .ignoredStale:
@@ -889,11 +899,15 @@ final class AppEnvironment {
     }
 
     private func showFlow(_ presentation: FlowBarPresentation) {
+        if presentation != .listening {
+            inputMeter = nil
+        }
         let sessionID = activeSessionID
         let handsFree = isHandsFreeActive
         flowBar.show(
             presentation,
             recordingStartedAt: presentation == .listening ? recordingStartedAt : nil,
+            inputMeter: inputMeter,
             handsFree: presentation == .listening && handsFree,
             recordingAction: { [weak self] in
                 guard let self, let sessionID,

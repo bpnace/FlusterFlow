@@ -13,6 +13,51 @@ enum AudioCaptureSpoolError: Error, Equatable, Sendable {
     case queueOverflow
 }
 
+final class AudioInputMeter: Sendable {
+    enum Signal: Equatable, Sendable {
+        case monitoring
+        case noInput
+        case interrupted
+    }
+
+    struct Reading: Equatable, Sendable {
+        let level: Float
+        let signal: Signal
+    }
+
+    private static let warningDelay: UInt64 = 2_000_000_000
+    private static let levelExpiry: UInt64 = 350_000_000
+    private let startedAt: UInt64
+    private let lastSignalAt = Atomic<UInt64>(0)
+    private let peakBits = Atomic<UInt32>(0)
+
+    init(startedAt: UInt64 = DispatchTime.now().uptimeNanoseconds) {
+        self.startedAt = startedAt
+    }
+
+    // Called by the single audio producer. Publish only peak amplitude and
+    // monotonic time. No audio samples leave the queue through this path.
+    func record(peak: Float, at time: UInt64 = DispatchTime.now().uptimeNanoseconds) {
+        guard peak > 0 else { return }
+        peakBits.store(peak.bitPattern, ordering: .relaxed)
+        lastSignalAt.store(time, ordering: .releasing)
+    }
+
+    func reading(at time: UInt64 = DispatchTime.now().uptimeNanoseconds) -> Reading {
+        let lastSignal = lastSignalAt.load(ordering: .acquiring)
+        let reference = lastSignal == 0 ? startedAt : lastSignal
+        let elapsed = time >= reference ? time - reference : 0
+        if elapsed >= Self.warningDelay {
+            return Reading(level: 0, signal: lastSignal == 0 ? .noInput : .interrupted)
+        }
+        guard lastSignal != 0, elapsed < Self.levelExpiry else {
+            return Reading(level: 0, signal: .monitoring)
+        }
+        let peak = Float(bitPattern: peakBits.load(ordering: .relaxed))
+        return Reading(level: min(1, peak.squareRoot()), signal: .monitoring)
+    }
+}
+
 /// A single-producer/single-consumer queue for the audio tap.
 ///
 /// The queue owns all of its storage before the tap is installed. `append` only
@@ -52,11 +97,13 @@ final class RealtimeAudioFrameQueue: @unchecked Sendable {
     private let activeProducerCount = Atomic<Int>(0)
     private let failureCode = Atomic<Int>(0)
     private let dataAvailable = DispatchSemaphore(value: 0)
+    private let inputMeter: AudioInputMeter?
 
     init?(
         sampleRate: Double,
         channelCount: Int,
-        capacitySeconds: TimeInterval = RealtimeAudioFrameQueue.defaultCapacitySeconds
+        capacitySeconds: TimeInterval = RealtimeAudioFrameQueue.defaultCapacitySeconds,
+        inputMeter: AudioInputMeter? = nil
     ) {
         guard sampleRate.isFinite,
               sampleRate > 0,
@@ -75,6 +122,7 @@ final class RealtimeAudioFrameQueue: @unchecked Sendable {
 
         self.sampleRate = sampleRate
         self.channelCount = channelCount
+        self.inputMeter = inputMeter
         capacityFrames = Int(frameCapacity)
         storage = UnsafeMutablePointer<Float>.allocate(capacity: capacityFrames)
         storage.initialize(repeating: 0, count: capacityFrames)
@@ -165,12 +213,15 @@ final class RealtimeAudioFrameQueue: @unchecked Sendable {
             }
         }
 
+        var peak: Float = 0
         for frame in 0..<frameCount {
             let sample = channelData[selectedChannel][frame]
             let monoSample = sample.isFinite ? sample : 0
+            peak = max(peak, abs(monoSample))
             let slot = (write + frame) % capacityFrames
             storage.advanced(by: slot).pointee = monoSample
         }
+        inputMeter?.record(peak: peak)
         writeIndex.store(write + frameCount, ordering: .releasing)
         dataAvailable.signal()
         return .accepted

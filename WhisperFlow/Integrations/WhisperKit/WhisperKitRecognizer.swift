@@ -598,11 +598,10 @@ actor OfflineWhisperKitRuntime: WhisperKitRuntimeServing {
     }
 
     func prewarm(modelDirectory: URL, tokenizerDirectory: URL) async throws {
+        // prepare leaves the Core ML models loaded. WhisperKit's
+        // specialization-only prewarm would discard them and force the first
+        // transcription to load them again.
         try await prepare(modelDirectory: modelDirectory, tokenizerDirectory: tokenizerDirectory)
-        guard let runtime else {
-            throw WhisperKitRecognizerError.runtimePreparationFailed
-        }
-        try await runtime.whisperKit.prewarmModels()
     }
 
     func unload() async {

@@ -229,6 +229,7 @@ final class FlowBarController {
     func show(
         _ presentation: FlowBarPresentation,
         recordingStartedAt: Date? = nil,
+        inputMeter: AudioInputMeter? = nil,
         handsFree: Bool = false,
         recordingAction: (() -> Void)? = nil,
         cancel: (() -> Void)? = nil,
@@ -248,6 +249,7 @@ final class FlowBarController {
         hostingView.rootView = FlowBarView(
             presentation: presentation,
             recordingStartedAt: recordingStartedAt,
+            inputMeter: inputMeter,
             handsFree: handsFree,
             recordingAction: presentation == .listening ? recordingAction : nil,
             cancel: cancelAction,
@@ -297,6 +299,7 @@ final class FocusPreservingPanel: NSPanel {
 struct FlowBarView: View {
     let presentation: FlowBarPresentation
     var recordingStartedAt: Date? = nil
+    var inputMeter: AudioInputMeter? = nil
     var handsFree = false
     var recordingAction: (() -> Void)? = nil
     let cancel: (() -> Void)?
@@ -380,18 +383,22 @@ struct FlowBarView: View {
 
     @ViewBuilder
     private var statusContent: some View {
-        if presentation == .listening, let recordingStartedAt {
-            TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                let elapsed = max(0, timeline.date.timeIntervalSince(recordingStartedAt))
-                statusContentBody(elapsed: elapsed)
+        if presentation == .listening {
+            TimelineView(.periodic(from: .now, by: 0.1)) { timeline in
+                let elapsed = recordingStartedAt.map { max(0, timeline.date.timeIntervalSince($0)) }
+                let reading = inputMeter?.reading()
+                let warning = inputWarning(for: reading?.signal)
+                let timerDescription = elapsed.map {
+                    RecordingTimerText.accessibilityValue(elapsed: $0, handsFree: handsFree)
+                }
+                statusContentBody(
+                    elapsed: elapsed,
+                    inputLevel: CGFloat(reading?.level ?? 0),
+                    warning: warning?.compact
+                )
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(presentation.title)
-                    .accessibilityValue(
-                        RecordingTimerText.accessibilityValue(
-                            elapsed: elapsed,
-                            handsFree: handsFree
-                        )
-                    )
+                    .accessibilityLabel(warning?.accessible ?? presentation.title)
+                    .accessibilityValue(timerDescription ?? "")
                     .accessibilityIdentifier(RecordingTimerText.accessibilityIdentifier)
             }
         } else {
@@ -401,26 +408,42 @@ struct FlowBarView: View {
         }
     }
 
+    private func inputWarning(for signal: AudioInputMeter.Signal?) -> (compact: String, accessible: String)? {
+        switch signal {
+        case .noInput: ("Kein Signal", "Kein Mikrofonsignal")
+        case .interrupted: ("Signal verloren", "Mikrofonsignal verloren")
+        case .monitoring, nil: nil
+        }
+    }
+
     @ViewBuilder
-    private func statusContentBody(elapsed: TimeInterval?) -> some View {
+    private func statusContentBody(
+        elapsed: TimeInterval?,
+        inputLevel: CGFloat? = nil,
+        warning: String? = nil
+    ) -> some View {
         if presentation.displaysWaveform {
-            HStack(spacing: 10) {
+            HStack(spacing: warning == nil ? 10 : 7) {
                 RainbowWaveform(
                     tempo: presentation.waveformTempo,
-                    animationEnabled: animationEnabled
+                    animationEnabled: animationEnabled,
+                    inputLevel: inputLevel,
+                    showsInputWarning: warning != nil
                 )
 
-                Text(presentation.compactTitle)
+                Text(warning ?? presentation.compactTitle)
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .tracking(0.65)
                     .foregroundStyle(.white.opacity(0.78))
                     .lineLimit(1)
+                    .fixedSize()
 
                 if let elapsed {
                     Text(RecordingTimerText.display(elapsed: elapsed))
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.72))
                         .monospacedDigit()
+                        .fixedSize()
                 }
             }
         } else {
@@ -468,6 +491,8 @@ struct FlowBarView: View {
 private struct RainbowWaveform: View {
     let tempo: Double
     let animationEnabled: Bool
+    let inputLevel: CGFloat?
+    let showsInputWarning: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -479,33 +504,49 @@ private struct RainbowWaveform: View {
         TimelineView(
             .animation(
                 minimumInterval: 1 / 30,
-                paused: reduceMotion || !animationEnabled
+                paused: reduceMotion || !animationEnabled || inputLevel != nil
             )
         ) { timeline in
-            let time = reduceMotion || !animationEnabled
+            let time = reduceMotion || !animationEnabled || inputLevel != nil
                 ? 0.72
                 : timeline.date.timeIntervalSinceReferenceDate
 
-            rainbowGradient
+            Rectangle()
+                .fill(waveformColor)
                 .mask {
                     HStack(alignment: .center, spacing: barSpacing) {
                         ForEach(0 ..< FlowBarWaveformGeometry.barCount, id: \.self) { index in
                             Capsule(style: .continuous)
                                 .frame(
                                     width: barWidth,
-                                    height: maximumHeight * FlowBarWaveformGeometry.normalizedHeight(
-                                        for: index,
-                                        at: time,
-                                        tempo: tempo
-                                    )
+                                    height: maximumHeight * barHeight(for: index, at: time)
                                 )
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
         }
-        .frame(width: 75, height: maximumHeight)
+        .frame(width: showsInputWarning ? 40 : 75, height: maximumHeight)
+        .clipped()
+        .overlay {
+            if showsInputWarning {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Color(red: 0.9, green: 0.19, blue: 0.24))
+            }
+        }
         .accessibilityHidden(true)
+    }
+
+    private var waveformColor: AnyShapeStyle {
+        showsInputWarning ? AnyShapeStyle(Color.red.opacity(0.65)) : AnyShapeStyle(rainbowGradient)
+    }
+
+    private func barHeight(for index: Int, at time: TimeInterval) -> CGFloat {
+        let shape = FlowBarWaveformGeometry.normalizedHeight(for: index, at: time, tempo: tempo)
+        guard let inputLevel else { return shape }
+        return 0.14 + inputLevel * (shape - 0.14)
     }
 
     private var rainbowGradient: LinearGradient {

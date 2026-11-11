@@ -46,6 +46,7 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
     private var activeQueue: RealtimeAudioFrameQueue?
     private var activeWriter: Task<Void, Never>?
     private var activeSessionID: DictationSessionID?
+    private var inputMeter: AudioInputMeter?
     private var nextGeneration: UInt64 = 0
     private var activeGeneration: UInt64?
     private var segmentDrainTask: Task<AudioCaptureSpoolError?, Never>?
@@ -92,6 +93,7 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
             let createdSpool = try AudioCaptureSpool()
             sessionSpool = createdSpool
             spool = createdSpool
+            inputMeter = AudioInputMeter()
             try await activateEngine(
                 for: sessionID,
                 generation: generation
@@ -117,6 +119,10 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
             }
             throw mapSpoolError(error)
         }
+    }
+
+    func inputMeter(for sessionID: DictationSessionID) -> AudioInputMeter? {
+        activeSessionID == sessionID ? inputMeter : nil
     }
 
     func finishCapture(for sessionID: DictationSessionID) async throws -> AudioInput {
@@ -319,7 +325,8 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
               let queue = RealtimeAudioFrameQueue(
             sampleRate: inputFormat.sampleRate,
             channelCount: Int(inputFormat.channelCount),
-            capacitySeconds: Self.realtimeQueueCapacitySeconds
+            capacitySeconds: Self.realtimeQueueCapacitySeconds,
+            inputMeter: inputMeter
         ) else {
             throw AudioCaptureError.audioStorageFailed
         }
@@ -525,6 +532,7 @@ actor AVAudioEngineCapture: AudioCapturing, IncrementalAudioProviding {
         activeQueue = nil
         activeWriter = nil
         activeSessionID = nil
+        inputMeter = nil
         activeGeneration = nil
         terminalError = nil
         isFinalizing = false
