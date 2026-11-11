@@ -2,8 +2,6 @@ import Foundation
 
 @MainActor
 final class PersonalLexiconStore: ObservableObject {
-    private static let applicationPreferencesDomain = "com.flusterflow.private"
-
     private enum Key {
         static let entries = "flusterflow.personal-lexicon.entries"
     }
@@ -40,7 +38,7 @@ final class PersonalLexiconStore: ObservableObject {
     }
 
     init(defaults suppliedDefaults: UserDefaults? = nil) {
-        let defaults = suppliedDefaults ?? Self.applicationDefaults()
+        let defaults = suppliedDefaults ?? FlusterFlowPreferences.open()
         self.defaults = defaults
         entries = Self.loadEntries(from: defaults)
     }
@@ -270,12 +268,6 @@ final class PersonalLexiconStore: ObservableObject {
         return true
     }
 
-    private static func applicationDefaults() -> UserDefaults {
-        guard let defaults = UserDefaults(suiteName: applicationPreferencesDomain) else {
-            return .standard
-        }
-        return defaults
-    }
 }
 
 private struct PersistentPersonalLexiconEntry: Codable {
