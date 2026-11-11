@@ -42,6 +42,7 @@
         "AudioCaptureSpoolTests/testFormatReconfigurationAppendsASecondSegmentWithoutLosingFrames()",
         "AudioCaptureSpoolTests/testIncrementalBatchesUseMonotonicOffsetsWithoutDuplication()",
         "AudioCaptureSpoolTests/testIncrementalCursorRejectsBackwardOffsets()",
+        "AudioCaptureSpoolTests/testInputMeterDistinguishesMissingSignalFromInterruptionAndRecovers()",
         "AudioCaptureSpoolTests/testQueueOverflowIsStickyAndFailsClosedWithoutBlockingProducer()",
         "AudioCaptureSpoolTests/testWriterFailureIsReportedAfterCommittedPrefix()",
         "AudioPlatformTests",

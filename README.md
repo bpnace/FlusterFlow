@@ -17,7 +17,7 @@
 
 FlusterFlow ist eine native macOS-Menüleisten-App für schnelles Diktieren in nativen Apps, Browsern und Electron-Anwendungen. Die Spracherkennung läuft standardmäßig vollständig lokal. Aufnahmen und Transkriptversionen bleiben wiederherstellbar auf dem eigenen Mac; eine textbasierte Cloud-Überarbeitung ist ein getrennt aktivierbarer BYOK-Pfad.
 
-> **Status:** Version 0.4.2 ist als Patch für zuverlässigere Diktate dokumentiert. Der unterstützte Daily-Driver-Weg ist ein lokal signierter Build aus dem Quellcode; Mikrofon, globaler Hotkey, Accessibility-Einfügung und TCC-Kontinuität bleiben manuelle Release-Gates.
+> **Status:** Version 0.5.0 zeigt den Mikrofonpegel an und verarbeitet längere Diktate teilweise bereits während der Aufnahme. Der unterstützte Daily-Driver-Weg ist ein lokal signierter Build aus dem Quellcode; Mikrofon, globaler Hotkey, Accessibility-Einfügung und TCC-Kontinuität bleiben manuelle Release-Gates.
 
 ## Highlights
 
@@ -156,6 +156,7 @@ Die isolierten AppKit-, WKWebView-, Accessibility- und Privacy-Harnesses sind un
 - [Model Supply Chain](docs/model-supply-chain.md)
 - [Verification Harnesses](docs/verification-harnesses.md)
 - [Architecture Decision Records](docs/adr)
+- [Release Notes 0.5.0](docs/release-v0.5.0.md)
 - [Release Notes 0.4.2](docs/release-v0.4.2.md)
 - [Release Notes 0.4.1](docs/release-v0.4.1.md)
 - [Release Notes 0.4.0](docs/release-v0.4.0.md)

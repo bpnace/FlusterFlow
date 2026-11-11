@@ -771,6 +771,7 @@ private extension CloudLanguage {
 
 struct DictationComposition {
     let coordinator: DictationCoordinator
+    let audioCapture: AVAudioEngineCapture
     let enrichment: SessionAwareOpenAIEnrichment
     let localRewriter: FoundationModelsTextRewriter
     let fallbackResults: EphemeralResultStore
@@ -830,10 +831,11 @@ struct DictationComposition {
         let fallbackResults = EphemeralResultStore()
         let sessionDiagnostics = ContentFreeSessionDiagnostics()
         let insertion = StrictLocalTextInserter(targets: targets)
+        let audioCapture = AVAudioEngineCapture(store: audioSamples)
         let coordinator = DictationCoordinator(
             contextProvider: context,
             audioCapture: TimedAudioCapture(
-                capture: AVAudioEngineCapture(store: audioSamples),
+                capture: audioCapture,
                 diagnostics: diagnostics,
                 sessionDiagnostics: sessionDiagnostics
             ),
@@ -866,6 +868,7 @@ struct DictationComposition {
         )
         return Self(
             coordinator: coordinator,
+            audioCapture: audioCapture,
             enrichment: enrichment,
             localRewriter: localRewriter,
             fallbackResults: fallbackResults,

@@ -220,10 +220,21 @@ enum PushToTalkRegistrationStatus: Equatable, Sendable {
     }
 }
 
+enum FlusterFlowPreferences {
+    // Keep this domain stable across releases so existing settings and
+    // personal dictionary entries are available after replacing the app.
+    static let domain = "com.flusterflow.private"
+
+    static func open() -> UserDefaults {
+        guard let defaults = UserDefaults(suiteName: domain) else {
+            preconditionFailure("FlusterFlow preferences domain is unavailable")
+        }
+        return defaults
+    }
+}
+
 @MainActor
 final class SettingsStore: ObservableObject {
-    private static let applicationPreferencesDomain = "com.flusterflow.private"
-
     private enum Key {
         static let contextAwareness = "flusterflow.context-awareness"
         static let localLearning = "flusterflow.local-learning-enabled"
@@ -303,7 +314,7 @@ final class SettingsStore: ObservableObject {
     private let defaults: UserDefaults
 
     init(defaults suppliedDefaults: UserDefaults? = nil) {
-        let defaults = suppliedDefaults ?? Self.applicationDefaults()
+        let defaults = suppliedDefaults ?? FlusterFlowPreferences.open()
         self.defaults = defaults
         defaults.removeObject(forKey: Key.legacySelectedMicrophone)
         if defaults.object(forKey: Key.contextAwareness) == nil {
@@ -388,13 +399,6 @@ final class SettingsStore: ObservableObject {
         }
         return PushToTalkShortcut.legacyValue(defaults.string(forKey: Key.shortcut))
             ?? .controlOptionSpace
-    }
-
-    private static func applicationDefaults() -> UserDefaults {
-        guard let defaults = UserDefaults(suiteName: applicationPreferencesDomain) else {
-            return .standard
-        }
-        return defaults
     }
 }
 

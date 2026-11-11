@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+@preconcurrency import WhisperKit
 import Foundation
 import XCTest
 @testable import WhisperFlow
@@ -137,6 +138,24 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         XCTAssertGreaterThan(first.audioSamples.count, 12 * 16_000)
         XCTAssertLessThan(first.audioSamples.count, Int(12.4 * 16_000))
         XCTAssertEqual(chunks.flatMap(\.audioSamples), samples)
+    }
+
+    func testCompletedWhisperChunkRequiresTheSameSpanAndWaveform() {
+        let speech = (0..<1_024).map { Float(sin(Double($0) * 0.2)) * 0.1 }
+        let original = AudioChunk(seekOffsetIndex: 200, audioSamples: speech)
+        let adjusted = speech.map { $0 * 0.9 + 0.001 }
+        XCTAssertTrue(OfflineWhisperKitRuntime.matchesCompletedAudio(
+            original, AudioChunk(seekOffsetIndex: 200, audioSamples: adjusted)
+        ))
+        XCTAssertFalse(OfflineWhisperKitRuntime.matchesCompletedAudio(
+            original, AudioChunk(seekOffsetIndex: 201, audioSamples: adjusted)
+        ))
+        XCTAssertFalse(OfflineWhisperKitRuntime.matchesCompletedAudio(
+            original, AudioChunk(seekOffsetIndex: 200, audioSamples: Array(adjusted.dropLast()))
+        ))
+        XCTAssertFalse(OfflineWhisperKitRuntime.matchesCompletedAudio(
+            original, AudioChunk(seekOffsetIndex: 200, audioSamples: Array(adjusted.reversed()))
+        ))
     }
 
     func testFinalAudioChunkingPreservesEverySampleIncludingShortTail() async throws {
@@ -1027,7 +1046,7 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         }
 
         try await Self.assertInstalledWhisperModelTranscribesAudio(
-            at: URL(fileURLWithPath: audioPath),
+            Self.normalizedAudio(at: URL(fileURLWithPath: audioPath)),
             model: .whisperLargeV3Turbo,
             backend: .whisperKitLargeV3Turbo,
             promptTerm: "Whisper Turbo",
@@ -1045,7 +1064,7 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         }
 
         try await Self.assertInstalledWhisperModelTranscribesAudio(
-            at: URL(fileURLWithPath: audioPath),
+            Self.normalizedAudio(at: URL(fileURLWithPath: audioPath)),
             model: .whisperLargeV3,
             backend: .whisperKitLargeV3,
             promptTerm: "Whisper Large",
@@ -1121,14 +1140,62 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         XCTAssertNotNil(transcript.adaptive)
     }
 
+    func testMicrophoneTranscribesSyntheticPlaybackWhenExplicitlyRequested() async throws {
+        guard let audioPath = ProcessInfo.processInfo.environment["FLUSTERFLOW_ACOUSTIC_SMOKE_AUDIO"],
+              !audioPath.isEmpty else {
+            throw XCTSkip("Set FLUSTERFLOW_ACOUSTIC_SMOKE_AUDIO to play and record a local synthetic fixture")
+        }
+
+        let samples = AudioBufferStore()
+        let capture = AVAudioEngineCapture(store: samples)
+        let session = DictationSessionID(rawValue: 9_008)
+        let playback = Process()
+        playback.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        playback.arguments = [audioPath]
+        defer {
+            if playback.isRunning { playback.terminate() }
+        }
+
+        try await capture.startCapture(for: session)
+        let audio: AudioSamples
+        do {
+            let activeMeter = await capture.inputMeter(for: session)
+            let meter = try XCTUnwrap(activeMeter)
+            try await Task.sleep(for: .milliseconds(250))
+            try playback.run()
+            var peak: Float = 0
+            while playback.isRunning {
+                peak = max(peak, meter.reading().level)
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            XCTAssertEqual(playback.terminationStatus, 0)
+            XCTAssertGreaterThan(peak, 0.05)
+            try await Task.sleep(for: .milliseconds(150))
+            let input = try await capture.finishCapture(for: session)
+            audio = try await samples.samples(for: input)
+            await capture.release(input)
+            print("FLUSTERFLOW_ACOUSTIC_SMOKE level=\(peak) frames=\(audio.values.count)")
+        } catch {
+            await capture.cancelCapture(for: session)
+            throw error
+        }
+
+        try await Self.assertInstalledWhisperModelTranscribesAudio(
+            audio,
+            model: .whisperLargeV3Turbo,
+            backend: .whisperKitLargeV3Turbo,
+            promptTerm: "Whisper Turbo",
+            sessionSeed: 9_009
+        )
+    }
+
     private static func assertInstalledWhisperModelTranscribesAudio(
-        at audioURL: URL,
+        _ audio: AudioSamples,
         model: ModelManifest,
         backend: RecognitionBackend,
         promptTerm: String,
         sessionSeed: UInt64
     ) async throws {
-        let audio = try normalizedAudio(at: audioURL)
         XCTAssertFalse(audio.values.isEmpty)
 
         let root = URL(fileURLWithPath: NSHomeDirectory())
@@ -1146,14 +1213,18 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
             ),
             backend: backend
         )
+        let environment = ProcessInfo.processInfo.environment
         let hints = RecognitionHints(
-            language: .german,
+            language: environment["FLUSTERFLOW_WHISPER_SMOKE_LANGUAGE"] == "en" ? .english : .german,
             terms: [],
             prioritizedLexiconTerms: ["FlusterFlow", promptTerm]
         )
         let sessionID = DictationSessionID(rawValue: sessionSeed)
 
+        let clock = ContinuousClock()
+        let preparationStart = clock.now
         try await recognizer.startRecognitionSession(hints: hints, sessionID: sessionID)
+        let preparation = preparationStart.duration(to: clock.now)
         let disposition = try await recognizer.updateRecognitionSession(
             with: RecognitionAudioChunk(samples: audio.values),
             sessionID: sessionID
@@ -1161,15 +1232,40 @@ final class WhisperKitRecognizerTests: XCTestCase, @unchecked Sendable {
         await recognizer.stopRecognitionSession(sessionID: sessionID)
 
         let input = await samples.store(audio)
+        let decodeStart = clock.now
         let transcript = try await recognizer.finalizeRecognitionSession(
             input,
             hints: hints,
             sessionID: sessionID
         )
+        let decode = decodeStart.duration(to: clock.now)
         await samples.release(input)
 
         XCTAssertEqual(disposition, .accepted)
         XCTAssertFalse(transcript.text.isEmpty)
+        if let reference = environment["FLUSTERFLOW_WHISPER_SMOKE_REFERENCE"] {
+            let expected = benchmarkWords(reference)
+            let actual = benchmarkWords(transcript.text)
+            var distances = Array(0...actual.count)
+            for (row, expectedWord) in expected.enumerated() {
+                var nextRow = [row + 1]
+                for (column, actualWord) in actual.enumerated() {
+                    let substitution = expectedWord == actualWord ? 0 : 1
+                    nextRow.append(min(distances[column + 1] + 1, nextRow[column] + 1, distances[column] + substitution))
+                }
+                distances = nextRow
+            }
+            print("FLUSTERFLOW_ASR_BENCHMARK preparation_ms=\(benchmarkMilliseconds(preparation)) decode_ms=\(benchmarkMilliseconds(decode)) words=\(expected.count) edits=\(distances[actual.count])")
+        }
+    }
+
+    private static func benchmarkWords(_ text: String) -> [String] {
+        text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    }
+
+    private static func benchmarkMilliseconds(_ duration: Duration) -> Int {
+        let components = duration.components
+        return Int(components.seconds * 1_000 + components.attoseconds / 1_000_000_000_000_000)
     }
 
     private static func normalizedAudio(at url: URL) throws -> AudioSamples {

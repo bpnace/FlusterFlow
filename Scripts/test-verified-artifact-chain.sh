@@ -76,6 +76,7 @@ assert_source_contract '[ ! -d "$STAGED_APP" ]'
 assert_source_contract 'INSTALL_TRANSACTION_STARTED=true'
 assert_source_contract 'INSTALL_REPLACED=true'
 assert_source_contract 'INSTALL_CONFIRMED=true'
+assert_source_contract 'EXPECTED_BUNDLE_ID="com.flusterflow.private"'
 
 for signing_script in "$VERIFY" "$INSTALL"; do
   assert_file_source_contract "$signing_script" 'if ! USER_KEYCHAIN_LIST_OUTPUT="$(/usr/bin/security list-keychains -d user)"; then'
@@ -93,7 +94,7 @@ for signing_script in "$VERIFY" "$INSTALL"; do
 done
 
 PROCESS_GUARD_LINE="$(line_of 'existing_app_process_would_not_terminate')"
-REPLACEMENT_LINE="$(line_of 'PREVIOUS_APP="$STAGING_ROOT/previous-install.bundle-backup"')"
+REPLACEMENT_LINE="$(/usr/bin/grep -nxF 'replace_app_bundle' "$INSTALL" | /usr/bin/cut -d: -f1)"
 if [ "$PROCESS_GUARD_LINE" -ge "$REPLACEMENT_LINE" ]; then
   printf '%s\n' 'existing-process guard must run before bundle replacement' >&2
   exit 1
@@ -108,7 +109,7 @@ fi
 REPLACED_LINE="$(line_of 'INSTALL_REPLACED=true')"
 TRANSACTION_LINE="$(line_of 'INSTALL_TRANSACTION_STARTED=true')"
 PREVIOUS_MOVE_LINE="$(line_of '/bin/mv "$INSTALL_APP" "$PREVIOUS_APP"')"
-INSTALL_MOVE_LINE="$(line_of 'if ! /bin/mv "$STAGING_ROOT/FlusterFlow.app" "$INSTALL_APP"; then')"
+INSTALL_MOVE_LINE="$(line_of 'if ! /bin/mv "$STAGED_APP" "$INSTALL_APP"; then')"
 CONFIRMED_LINE="$(line_of 'INSTALL_CONFIRMED=true')"
 SUCCESS_LINE="$(line_of 'printf '\''{"schemaVersion":1,"status":"installed"')"
 if [ "$TRANSACTION_LINE" -ge "$PREVIOUS_MOVE_LINE" ] || \
@@ -138,9 +139,8 @@ trap transaction_cleanup EXIT
 
 set +e
 (
-  export HOME="$TRANSACTION_TEST_ROOT/home"
   source "$INSTALL"
-  INSTALL_ROOT="$HOME/Applications"
+  INSTALL_ROOT="$TRANSACTION_TEST_ROOT/home/Applications"
   INSTALL_APP="$INSTALL_ROOT/FlusterFlow.app"
   STAGING_ROOT="$INSTALL_ROOT/.flusterflow-install.signal-test"
   STAGED_APP="$STAGING_ROOT/FlusterFlow.app"
@@ -163,5 +163,56 @@ if [ "$SIGNAL_STATUS" -ne 143 ] || \
   printf '%s\n' 'signal after backup move must restore the original app and clean staging' >&2
   exit 1
 fi
+
+for outcome in confirmed rolled_back; do
+  TEST_USER_ROOT="$TRANSACTION_TEST_ROOT/$outcome"
+  PREFERENCES="$TEST_USER_ROOT/Library/Preferences/com.flusterflow.private.plist"
+  /bin/mkdir -p "$(/usr/bin/dirname "$PREFERENCES")"
+  cat >"$PREFERENCES" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>flusterflow.personal-lexicon.entries</key>
+  <data>
+  W3siaWQiOiIxM0E1MzMzQy00QzUwLTREN0MtOERGQi0yRjk4QTk5N0FCNzUiLCJjYW5vbmljYWwi
+  OiJNw7xuY2hlbiIsIm1pc3NwZWxsaW5ncyI6WyJNdW5jaGVuIl0sImxhbmd1YWdlIjoiZ2VybWFu
+  IiwicHJpb3JpdHkiOjcsInNvdXJjZSI6Im1hbnVhbCIsImNyZWF0ZWRBdCI6MCwidXBkYXRlZEF0
+  IjowfV0=
+  </data>
+  <key>flusterflow.language</key><string>german</string>
+  <key>flusterflow.hands-free-enabled</key><true/>
+</dict></plist>
+EOF
+  /usr/bin/plutil -lint "$PREFERENCES" >/dev/null
+  /bin/cp "$PREFERENCES" "$TEST_USER_ROOT/original-preferences.plist"
+  (
+    source "$INSTALL"
+    INSTALL_ROOT="$TEST_USER_ROOT/Applications"
+    INSTALL_APP="$INSTALL_ROOT/FlusterFlow.app"
+    STAGING_ROOT="$INSTALL_ROOT/.flusterflow-install.update-test"
+    STAGED_APP="$STAGING_ROOT/FlusterFlow.app"
+    /bin/mkdir -p "$INSTALL_APP" "$STAGED_APP"
+    printf '%s\n' original >"$INSTALL_APP/original.marker"
+    printf '%s\n' updated >"$STAGED_APP/updated.marker"
+    trap cleanup EXIT
+
+    replace_app_bundle
+    test -f "$INSTALL_APP/updated.marker"
+    if [ "$outcome" = confirmed ]; then
+      INSTALL_CONFIRMED=true
+    else
+      rollback_install
+    fi
+  )
+  if [ "$outcome" = confirmed ]; then
+    test -f "$TEST_USER_ROOT/Applications/FlusterFlow.app/updated.marker"
+  else
+    test -f "$TEST_USER_ROOT/Applications/FlusterFlow.app/original.marker"
+  fi
+  if ! /usr/bin/cmp -s "$PREFERENCES" "$TEST_USER_ROOT/original-preferences.plist"; then
+    printf 'user preferences changed during update (%s)\n' "$outcome" >&2
+    exit 1
+  fi
+done
 
 printf '%s\n' 'Verified artifact chain parser: PASS'

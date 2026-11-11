@@ -543,21 +543,29 @@ final class HotKeyAndDiagnosticsTests: XCTestCase, @unchecked Sendable {
 
     @MainActor
     func testFlowBarPreviewsKeepTheirWindowCornersTransparent() throws {
-        let previews: [(FlowBarPresentation, (() -> Void)?, ColorScheme, String)] = [
-            (.listening, {}, .light, "flusterflow-flowbar-listening-light.png"),
-            (.listening, {}, .dark, "flusterflow-flowbar-listening-dark.png"),
+        let liveMeter = AudioInputMeter()
+        let mutedMeter = AudioInputMeter(startedAt: 0)
+        let interruptedMeter = AudioInputMeter(startedAt: 0)
+        interruptedMeter.record(peak: 0.64, at: 1)
+        let previews: [(FlowBarPresentation, AudioInputMeter?, ColorScheme, String)] = [
+            (.listening, liveMeter, .light, "flusterflow-flowbar-listening-light.png"),
+            (.listening, liveMeter, .dark, "flusterflow-flowbar-listening-dark.png"),
+            (.listening, mutedMeter, .dark, "flusterflow-flowbar-input-warning.png"),
+            (.listening, interruptedMeter, .dark, "flusterflow-flowbar-input-interrupted.png"),
             (.inserted, nil, .dark, "flusterflow-flowbar-inserted.png")
         ]
 
-        for (presentation, cancel, colorScheme, fileName) in previews {
+        for (presentation, meter, colorScheme, fileName) in previews {
+            liveMeter.record(peak: 0.64)
             let size = FlowBarLayout.windowSize(for: presentation)
             let renderer = ImageRenderer(
                 content: FlowBarView(
                     presentation: presentation,
                     recordingStartedAt: presentation == .listening ? Date().addingTimeInterval(-65) : nil,
+                    inputMeter: meter,
                     handsFree: colorScheme == .dark,
                     recordingAction: presentation == .listening ? {} : nil,
-                    cancel: cancel,
+                    cancel: presentation == .listening ? {} : nil,
                     animationEnabled: false
                 )
                 .environment(\.colorScheme, colorScheme)

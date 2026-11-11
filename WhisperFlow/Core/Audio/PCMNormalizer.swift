@@ -1,7 +1,7 @@
 @preconcurrency import AVFoundation
 import Foundation
 
-struct CapturedAudioChunk: Sendable {
+struct CapturedAudioChunk: Equatable, Sendable {
     let monoSamples: [Float]
     let sampleRate: Double
 }

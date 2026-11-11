@@ -4,6 +4,35 @@ import XCTest
 @testable import WhisperFlow
 
 final class AudioCaptureSpoolTests: XCTestCase {
+    func testInputMeterDistinguishesMissingSignalFromInterruptionAndRecovers() throws {
+        let start: UInt64 = 1_000_000_000
+        let meter = AudioInputMeter(startedAt: start)
+        let silent = AudioInputMeter.Reading(level: 0, signal: .monitoring)
+        meter.record(peak: 0, at: start + 1_000_000_000)
+        XCTAssertEqual(meter.reading(at: start + 1_999_999_999), silent)
+        XCTAssertEqual(meter.reading(at: start + 2_000_000_000).signal, .noInput)
+
+        let queue = try XCTUnwrap(RealtimeAudioFrameQueue(
+            sampleRate: 48_000,
+            channelCount: 1,
+            inputMeter: meter
+        ))
+        XCTAssertEqual(queue.append(try makeBuffer(sampleRate: 48_000, channels: [[0, -0.25, 0.1]])), .accepted)
+        let received = DispatchTime.now().uptimeNanoseconds
+        XCTAssertEqual(meter.reading(at: received), .init(level: 0.5, signal: .monitoring))
+        meter.record(peak: 0, at: received + 10_000_000)
+        XCTAssertEqual(meter.reading(at: received + 100_000_000).level, 0.5)
+        XCTAssertEqual(meter.reading(at: received + 350_000_000), silent)
+
+        meter.record(peak: 0, at: received + 1_000_000_000)
+        XCTAssertEqual(meter.reading(at: received + 2_000_000_000).signal, .interrupted)
+
+        meter.record(peak: 0.04, at: received + 2_100_000_000)
+        let recovered = meter.reading(at: received + 2_100_000_000)
+        XCTAssertEqual(recovered.signal, .monitoring)
+        XCTAssertEqual(recovered.level, 0.2, accuracy: 0.001)
+    }
+
     func testCaptureLongerThanLegacyLimitDrainsEveryFrameWithBoundedQueue() async throws {
         let url = temporaryURL()
         let spool = try AudioCaptureSpool(fileURL: url)
