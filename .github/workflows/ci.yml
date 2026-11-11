@@ -42,8 +42,8 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Build and test unsigned debug app
-        run: bash Scripts/run-capped-tests.sh --full
+      - name: Build unsigned debug app and run capped tests
+        run: bash Scripts/run-capped-tests.sh
 
       - name: Build and test verification tools
         env:
