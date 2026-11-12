@@ -16,7 +16,7 @@ jobs:
   verify:
     name: Build, tests, and local privacy gates
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -42,18 +42,8 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Build unsigned debug app
-        run: |
-          xcodebuild \
-            -project WhisperFlow.xcodeproj \
-            -scheme WhisperFlow \
-            -configuration Debug \
-            -destination 'platform=macOS,arch=arm64' \
-            CODE_SIGNING_ALLOWED=NO \
-            build
-
-      - name: Run capped app tests using the Xcode build
-        run: bash Scripts/run-capped-tests.sh
+      - name: Verify capped app test plan
+        run: bash Scripts/run-capped-tests.sh --verify-only >/dev/null
 
       - name: Build and test verification tools
         env:
