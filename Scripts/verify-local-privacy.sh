@@ -5,9 +5,19 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 bash Scripts/verify-local-network.sh
-swift build --product TextTargetHarness
-swift build --product PrivacyHarness
-swift build --target PrivacyHarnessTests
+if [[ $# -eq 0 ]]; then
+  swift build --product TextTargetHarness
+  swift build --product PrivacyHarness
+  swift build --target PrivacyHarnessTests
+  bin_dir=.build/debug
+elif [[ $# -eq 2 && "$1" == "--bin-dir" && -n "$2" ]]; then
+  bin_dir="$2"
+else
+  echo "usage: $0 [--bin-dir <path>]" >&2
+  exit 64
+fi
+target_harness="$bin_dir/TextTargetHarness"
+privacy_harness="$bin_dir/PrivacyHarness"
 
 pass_report="$(mktemp -t flusterflow-privacy-pass)"
 socket_report="$(mktemp -t flusterflow-privacy-socket)"
@@ -15,8 +25,7 @@ canary_report="$(mktemp -t flusterflow-privacy-canary)"
 setup_failure_report="$(mktemp -t flusterflow-privacy-setup-failure)"
 trap 'rm -f "$pass_report" "$socket_report" "$canary_report" "$setup_failure_report"' EXIT
 
-.build/debug/PrivacyHarness -- \
-  .build/debug/TextTargetHarness --privacy-smoke >"$pass_report"
+"$privacy_harness" -- "$target_harness" --privacy-smoke >"$pass_report"
 jq -e '
   .schemaVersion == 1 and
   .harnessId == "E-PRIVACY-HARNESS" and
@@ -30,13 +39,11 @@ jq -e '
 ' "$pass_report" >/dev/null
 
 set +e
-.build/debug/PrivacyHarness -- \
-  .build/debug/PrivacyHarness --socket-fixture >"$socket_report"
+"$privacy_harness" -- "$privacy_harness" --socket-fixture >"$socket_report"
 socket_exit=$?
-.build/debug/PrivacyHarness -- \
-  .build/debug/PrivacyHarness --canary-leak-fixture >"$canary_report"
+"$privacy_harness" -- "$privacy_harness" --canary-leak-fixture >"$canary_report"
 canary_exit=$?
-.build/debug/PrivacyHarness -- \
+"$privacy_harness" -- \
   /tmp/flusterflow-private-path-secret/nonexistent >"$setup_failure_report"
 setup_failure_exit=$?
 set -e

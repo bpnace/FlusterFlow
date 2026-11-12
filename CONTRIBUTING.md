@@ -36,6 +36,10 @@ bash Scripts/verify-target-harness.sh
 bash Scripts/verify-local-privacy.sh
 ```
 
+Run the complete SwiftPM suite locally with `swift test`. GitHub CI builds the
+app with Xcode and runs the capped app plan, the standalone verification tool
+tests, and the privacy and artifact checks.
+
 Run the extended Xcode plan for release-sensitive changes:
 
 ```bash
