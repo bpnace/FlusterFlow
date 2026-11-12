@@ -111,6 +111,10 @@ Details: [Model Supply Chain](docs/model-supply-chain.md) · [Third-Party Notice
 
 ## Entwicklung
 
+Vor dem Push baut der vollständige Xcode-Testplan die App lokal und führt die
+App-Tests aus. Die Schritte für lokale Prüfung, GitHub-CI und Release-Build
+stehen in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 Ein unsignierter Debug-Build:
 
 ```bash

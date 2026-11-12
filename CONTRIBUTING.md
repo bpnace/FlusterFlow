@@ -14,36 +14,32 @@ By contributing, you agree that your contribution is licensed under the reposito
 - Apple Silicon for the documented build and test path
 - Xcode with Swift 6
 - `jq`
-- Optional Xcode Metal toolchain for Qwen development
+- Xcode Metal Toolchain for the app build (`xcodebuild -downloadComponent MetalToolchain`)
 
-Build the unsigned debug application:
+Before pushing, build the unsigned app and run the full app test plan locally:
 
 ```bash
-xcodebuild -project WhisperFlow.xcodeproj -scheme WhisperFlow \
-  -configuration Debug -destination 'platform=macOS,arch=arm64' \
-  CODE_SIGNING_ALLOWED=NO build
+bash Scripts/run-capped-tests.sh --full
 ```
 
-Run the normal verification set:
+GitHub CI runs the standalone verification tool tests, repository hygiene,
+privacy checks, and artifact checks. To run the latter checks locally:
 
 ```bash
-bash Scripts/verify-repository-hygiene.sh
-bash Scripts/run-capped-tests.sh
-swift test
+bash Scripts/verify-repository-hygiene.sh --history
 bash Scripts/test-verified-artifact-chain.sh
-bash Scripts/verify-local-network.sh
 bash Scripts/verify-target-harness.sh
 bash Scripts/verify-local-privacy.sh
 ```
 
-Run the complete SwiftPM suite locally with `swift test`. GitHub CI builds the
-app with Xcode and runs the capped app plan, the standalone verification tool
-tests, and the privacy and artifact checks.
-
-Run the extended Xcode plan for release-sensitive changes:
+Before tagging a release, run **Release verification** on `main` with the
+current full commit SHA. The workflow builds the app with GitHub's Xcode
+toolchain and runs the capped app tests. Check that both CI and Release
+verification passed for the commit you intend to tag.
 
 ```bash
-bash Scripts/run-capped-tests.sh --full
+release_commit="$(gh api repos/{owner}/{repo}/commits/main --jq .sha)"
+gh workflow run release-verification.yml --ref main -f commit="$release_commit"
 ```
 
 ## Privacy and repository hygiene
